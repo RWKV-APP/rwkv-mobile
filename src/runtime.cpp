@@ -1542,7 +1542,7 @@ int Runtime::chat(int model_id, std::vector<std::string> inputs,
 
     int decoded_idx = 0;
     bool is_pseudo_thinking = enable_reasoning && model->response_buffer.find("</think>") != std::string::npos;
-    bool thinking_end_tag_found = is_pseudo_thinking;
+    bool thinking_end_tag_found = false;
     bool first_token_ban_thinking_tag = !enable_reasoning || is_pseudo_thinking || force_reasoning;
 
     for (int i = 0; i < max_length; i++) {
@@ -1806,7 +1806,6 @@ int Runtime::chat_batch(int model_id, std::vector<std::vector<std::string>> inpu
         }
 
         is_pseudo_thinking_batch[batch_idx] = !enable_reasoning || (enable_reasoning && model->response_buffer_batch[batch_idx].find("</think>") != std::string::npos);
-        thinking_end_tag_found_batch[batch_idx] = enable_reasoning && model->response_buffer_batch[batch_idx].find("</think>") != std::string::npos;
     }
 
     size_t common_prefix_len = 0;
