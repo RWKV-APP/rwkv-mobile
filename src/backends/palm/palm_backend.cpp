@@ -10,6 +10,8 @@
 #if defined(__aarch64__) && defined(__linux__)
 #include <asm/hwcap.h>
 #include <sys/auxv.h>
+#elif defined(__aarch64__) && defined(__APPLE__)
+#include <sys/sysctl.h>
 #endif
 
 namespace rwkvmobile {
@@ -37,6 +39,13 @@ bool palm_backend::is_supported() {
     // Match Palm's armv8.2-a+dotprod+fp16+fp16fml baseline; i8mm is optional.
     const unsigned long required = HWCAP_ASIMDDP | HWCAP_FPHP | HWCAP_ASIMDHP | HWCAP_ASIMDFHM;
     return (getauxval(AT_HWCAP) & required) == required;
+#elif defined(__aarch64__) && defined(__APPLE__)
+    for (const char* feature : {"hw.optional.arm.FEAT_DotProd", "hw.optional.arm.FEAT_FP16", "hw.optional.arm.FEAT_FHM"}) {
+        int available = 0;
+        size_t size = sizeof(available);
+        if (sysctlbyname(feature, &available, &size, nullptr, 0) != 0 || !available) return false;
+    }
+    return true;
 #else
     return true;
 #endif

@@ -47,6 +47,18 @@ endif()
 
 list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
 
+if (WIN32 AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    # LLVM's Windows runtime is not discovered reliably by FindOpenMP.
+    get_filename_component(RWKV_CLANG_BIN "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    find_library(OpenMP_libomp_LIBRARY NAMES libomp
+        HINTS "${RWKV_CLANG_BIN}/../lib" NO_DEFAULT_PATH REQUIRED)
+    set(OpenMP_C_FLAGS "-fopenmp" CACHE STRING "Clang OpenMP flags")
+    set(OpenMP_CXX_FLAGS "-fopenmp" CACHE STRING "Clang OpenMP flags")
+    set(OpenMP_C_LIB_NAMES "libomp" CACHE STRING "Clang OpenMP runtime")
+    set(OpenMP_CXX_LIB_NAMES "libomp" CACHE STRING "Clang OpenMP runtime")
+    find_package(OpenMP REQUIRED)
+endif()
+
 option(ADDRESS_SANITIZER "Enable AddressSanitizer" OFF)
 
 if (RWKV_MOBILE_ENABLE_DEBUG_SYMBOLS)
@@ -277,6 +289,9 @@ if (ENABLE_PALM_BACKEND)
         set(PALM_INFRA_SOURCE_DIR "${palm_infra_SOURCE_DIR}")
     endif()
     add_subdirectory("${PALM_INFRA_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/palm-infra" EXCLUDE_FROM_ALL)
+    if (APPLE AND (CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64" OR CMAKE_OSX_ARCHITECTURES MATCHES "arm64"))
+        target_compile_options(mollm_lib PRIVATE "-march=armv8.2-a+dotprod+fp16+fp16fml")
+    endif()
     if (WIN32 AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         execute_process(
             COMMAND "${CMAKE_CXX_COMPILER}" --print-resource-dir

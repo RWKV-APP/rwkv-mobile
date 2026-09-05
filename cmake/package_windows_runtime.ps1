@@ -10,6 +10,14 @@ $runtimeNames = @($imports | ForEach-Object {
 } | Sort-Object -Unique)
 foreach ($name in $runtimeNames) {
     $runtime = Join-Path $compilerBin $name
+    if (!(Test-Path -LiteralPath $runtime)) {
+        $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+        $visualStudio = & $vswhere -latest -property installationPath
+        $redist = Join-Path $visualStudio 'VC\Redist\MSVC'
+        $runtime = Get-ChildItem -LiteralPath $redist -Filter $name -Recurse -File |
+            Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+    }
+    if (!$runtime) { throw "Missing compiler runtime: $name" }
     if (!(Test-Path -LiteralPath $runtime)) { throw "Missing compiler runtime: $runtime" }
     Copy-Item -LiteralPath $runtime -Destination (Split-Path $libraryPath)
 }

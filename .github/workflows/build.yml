@@ -271,6 +271,8 @@ jobs:
         rm -rf package
         mkdir -p package
         cp build-arm64/librwkv_mobile.dylib package/librwkv_mobile.dylib
+        otool -L package/librwkv_mobile.dylib
+        python3 cmake/check_packaged_library.py package/librwkv_mobile.dylib
         pushd package
         zip -9 -y -r ../${{ env.PACKAGENAME }}.zip .
         popd
