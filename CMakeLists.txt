@@ -210,6 +210,9 @@ if (ENABLE_MNN_BACKEND)
         mnn
         GIT_REPOSITORY https://github.com/alibaba/MNN
         GIT_TAG 3.3.0
+        PATCH_COMMAND "${CMAKE_COMMAND}"
+            -DMNN_SOURCE_DIR=<SOURCE_DIR>
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch_mnn_clang_runtime.cmake"
     )
 
     if (ANDROID OR (WIN32 AND (CMAKE_SYSTEM_PROCESSOR MATCHES "arm64" OR CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")))
