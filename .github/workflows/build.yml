@@ -5,6 +5,9 @@ on: [push, pull_request, workflow_dispatch]
 permissions:
   contents: read
 
+env:
+  MLX_SWIFT_EXAMPLES_COMMIT: 34b276b9c774a8d6465e009382dae12f4e97b849
+
 jobs:
   setup:
     permissions:
@@ -151,7 +154,10 @@ jobs:
     - name: build-arm64
       run: |
         rustup target add aarch64-apple-ios
-        git clone --single-branch --branch rwkv-mobile https://github.com/mollysophia/mlx-swift-examples.git --depth 1
+        git init mlx-swift-examples
+        git -C mlx-swift-examples remote add origin https://github.com/mollysophia/mlx-swift-examples.git
+        git -C mlx-swift-examples fetch --depth 1 origin "$MLX_SWIFT_EXAMPLES_COMMIT"
+        git -C mlx-swift-examples checkout --detach FETCH_HEAD
         cd mlx-swift-examples
         xcodebuild -project mlx-swift-examples.xcodeproj -scheme MLXModelFFI -configuration Release -derivedDataPath build -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO
         cp build/Build/Products/Release-iphoneos/libMLXModelFFI.a ../src/backends/mlx/prebuilt/ios-arm64/libMLXModelFFI.a
@@ -246,7 +252,10 @@ jobs:
     - uses: actions/checkout@v4
     - name: build-arm64
       run: |
-        git clone --single-branch --branch rwkv-mobile https://github.com/mollysophia/mlx-swift-examples.git --depth 1
+        git init mlx-swift-examples
+        git -C mlx-swift-examples remote add origin https://github.com/mollysophia/mlx-swift-examples.git
+        git -C mlx-swift-examples fetch --depth 1 origin "$MLX_SWIFT_EXAMPLES_COMMIT"
+        git -C mlx-swift-examples checkout --detach FETCH_HEAD
         cd mlx-swift-examples
         xcodebuild -project mlx-swift-examples.xcodeproj -scheme MLXModelFFI -configuration Release -derivedDataPath build -destination 'platform=OS X'
         cp build/Build/Products/Release/libMLXModelFFI.a ../src/backends/mlx/prebuilt/macos-arm64/libMLXModelFFI.a
@@ -271,6 +280,8 @@ jobs:
         rm -rf package
         mkdir -p package
         cp build-arm64/librwkv_mobile.dylib package/librwkv_mobile.dylib
+        cp -R mlx-swift-examples/build/Build/Products/Release/mlx-swift_Cmlx.bundle package/
+        test -s package/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib
         otool -L package/librwkv_mobile.dylib
         python3 cmake/check_packaged_library.py package/librwkv_mobile.dylib
         pushd package
