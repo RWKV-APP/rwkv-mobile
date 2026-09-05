@@ -51,6 +51,10 @@
 #include "mlx_rwkv_backend.h"
 #endif
 
+#ifdef ENABLE_PALM
+#include "palm_backend.h"
+#endif
+
 #if defined(ENABLE_VISION)
 #include "multimodal/vision/vision_encoder.h"
 #endif
@@ -268,6 +272,8 @@ std::string backend_enum_to_str(int backend) {
             return "mlx";
         case RWKV_BACKEND_MTK_NP9:
             return "mtk_np9";
+        case RWKV_BACKEND_PALM:
+            return "palm";
         default:
             return "unknown";
     }
@@ -292,6 +298,8 @@ int backend_str_to_enum(std::string backend) {
         return RWKV_BACKEND_MLX;
     } else if (backend == "mtk_np9") {
         return RWKV_BACKEND_MTK_NP9;
+    } else if (backend == "palm") {
+        return RWKV_BACKEND_PALM;
     }
     return -1;
 }
@@ -446,6 +454,14 @@ int Runtime::load_model(std::string model_path, std::string backend_name, std::s
             [](execution_provider *p) { delete (mlx_rwkv_backend*)p; });
 #else
         LOGE("MLX backend is not supported on this platform\n");
+        return ret_model_id;
+#endif
+    } else if (backend_id == RWKV_BACKEND_PALM) {
+#ifdef ENABLE_PALM
+        model_instance->backend = std::unique_ptr<execution_provider, std::function<void(execution_provider*)>>(new palm_backend,
+            [](execution_provider *p) { delete (palm_backend*)p; });
+#else
+        LOGE("Palm backend is not supported on this platform\n");
         return ret_model_id;
 #endif
     } else {
@@ -693,6 +709,12 @@ int Runtime::get_available_backend_ids(std::vector<int> &backend_ids) {
 
 #ifdef ENABLE_MLX
     backend_ids.push_back(RWKV_BACKEND_MLX);
+#endif
+
+#ifdef ENABLE_PALM
+    if (palm_backend::is_supported()) {
+        backend_ids.push_back(RWKV_BACKEND_PALM);
+    }
 #endif
 
     return RWKV_SUCCESS;

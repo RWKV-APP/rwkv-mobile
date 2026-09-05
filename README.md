@@ -2,6 +2,9 @@
 
 An inference runtime with multiple backends supported.
 
+This RWKV-APP fork maintains the native libraries consumed by RWKV Chat. Upstream
+is [MollySophia/rwkv-mobile](https://github.com/MollySophia/rwkv-mobile).
+
 ## Goal:
 
 - Easy integration on different platforms using flutter or native cpp, including mobile devices.
@@ -19,12 +22,20 @@ An inference runtime with multiple backends supported.
 - [x] MediaTek Neuropilot7: Running RWKV on Dimensity 9300 NPU.
 - [x] MediaTek Neuropilot9: Running RWKV on Dimensity 9500 NPU through Neuron Adapter/uSDK.
 - [x] CoreML: Running RWKV with Apple Neural Engine. Based on Apple's CoreML framework.
+- [x] Palm-Infra: CPU inference from `.mollm` packages, enabled with `-DENABLE_PALM_BACKEND=ON`.
 - [ ] To be continued...
 
 ## How to build:
 
 - Install [rust](https://www.rust-lang.org/tools/install) and [cargo](https://doc.rust-lang.org/cargo/getting-started/installation.html) (for building the web-rwkv backend)
-- Check https://github.com/MollySophia/rwkv-mobile/blob/master/.github/workflows/build.yml
+- Check [.github/workflows/build.yml](.github/workflows/build.yml).
+
+Palm builds fetch the commit in `PALM_INFRA_GIT_TAG`; `PALM_INFRA_DIR` is an
+explicit local development override. Linux and Android ARM64 expose Palm only
+when the CPU supports dot-product and FP16 arithmetic. i8mm remains optional.
+Windows packages include the OpenMP DLL imported by the native library. The
+desktop CI loads the packaged library and checks the public backend enumeration;
+application and model acceptance are separate release checks.
 
 ### Build for Android:
 - Install Android NDK r25c (recommended version) (Download from https://dl.google.com/android/repository/android-ndk-r25c-linux.zip)

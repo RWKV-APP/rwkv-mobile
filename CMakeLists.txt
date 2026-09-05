@@ -26,6 +26,11 @@ option(ENABLE_MTK_NP7_BACKEND "Enable MediaTek NP7 backend" OFF)
 option(ENABLE_MTK_NP9_BACKEND "Enable MediaTek NP9 backend" OFF)
 option(ENABLE_COREML_BACKEND "Enable CoreML backend" OFF)
 option(ENABLE_MLX_BACKEND "Enable MLX backend" OFF)
+option(ENABLE_PALM_BACKEND "Enable Palm-Infra CPU backend" OFF)
+set(PALM_INFRA_DIR "" CACHE PATH
+    "Optional path to a local Palm-Infra source tree")
+set(PALM_INFRA_GIT_TAG "3da00340257369c686dd30f7077cf2e5a9293e6c" CACHE STRING
+    "Pinned Palm-Infra source revision")
 
 option(ENABLE_VISION "Enable vision" OFF)
 option(ENABLE_WHISPER "Enable whisper" OFF)
@@ -243,6 +248,52 @@ endif()
 
 if (ENABLE_MTK_NP7_BACKEND OR ENABLE_MTK_NP9_BACKEND)
     set(RWKV_MOBILE_SRCS ${RWKV_MOBILE_SRCS} src/backends/mtk_common/mtk_rwkv_dlopen.cpp)
+endif()
+
+if (ENABLE_PALM_BACKEND)
+    set(MOLLM_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(MOLLM_BUILD_EXAMPLE OFF CACHE BOOL "" FORCE)
+    set(MOLLM_METAL OFF CACHE BOOL "" FORCE)
+    set(MOLLM_CUDA OFF CACHE BOOL "" FORCE)
+    if (PALM_INFRA_DIR)
+        if (NOT EXISTS "${PALM_INFRA_DIR}/CMakeLists.txt")
+            message(FATAL_ERROR "PALM_INFRA_DIR does not contain Palm-Infra: ${PALM_INFRA_DIR}")
+        endif()
+        set(PALM_INFRA_SOURCE_DIR "${PALM_INFRA_DIR}")
+    else()
+        FetchContent_Declare(
+            palm_infra
+            GIT_REPOSITORY https://github.com/HaloWang/Palm-Infra.git
+            GIT_TAG ${PALM_INFRA_GIT_TAG}
+            GIT_SHALLOW FALSE
+            PATCH_COMMAND "${CMAKE_COMMAND}"
+                -DPALM_INFRA_SOURCE_DIR=<SOURCE_DIR>
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch_palm_windows_sampler.cmake"
+        )
+        FetchContent_GetProperties(palm_infra)
+        if (NOT palm_infra_POPULATED)
+            FetchContent_Populate(palm_infra)
+        endif()
+        set(PALM_INFRA_SOURCE_DIR "${palm_infra_SOURCE_DIR}")
+    endif()
+    add_subdirectory("${PALM_INFRA_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/palm-infra" EXCLUDE_FROM_ALL)
+    if (WIN32 AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        execute_process(
+            COMMAND "${CMAKE_CXX_COMPILER}" --print-resource-dir
+            OUTPUT_VARIABLE PALM_CLANG_RESOURCE_DIR
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+        if (CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|ARM64|aarch64")
+            set(PALM_CLANG_BUILTINS "${PALM_CLANG_RESOURCE_DIR}/lib/windows/clang_rt.builtins-aarch64.lib")
+        else()
+            set(PALM_CLANG_BUILTINS "${PALM_CLANG_RESOURCE_DIR}/lib/windows/clang_rt.builtins-x86_64.lib")
+        endif()
+        if (NOT EXISTS "${PALM_CLANG_BUILTINS}")
+            message(FATAL_ERROR "Palm requires Clang builtins: ${PALM_CLANG_BUILTINS}")
+        endif()
+        target_link_libraries(mollm_lib PUBLIC "${PALM_CLANG_BUILTINS}")
+    endif()
+    set(RWKV_MOBILE_SRCS ${RWKV_MOBILE_SRCS} src/backends/palm/palm_backend.cpp)
 endif()
 
 if (ENABLE_VISION)
@@ -606,6 +657,15 @@ if (ENABLE_MLX_BACKEND)
     target_link_libraries(rwkv_mobile_internal PUBLIC ${MLX_LIB_PATH} ${FOUNDATION_LIBRARY} ${METAL_FRAMEWORK} ${Accelerate_LIBRARY})
 endif()
 
+if (ENABLE_PALM_BACKEND)
+    target_compile_definitions(rwkv_mobile_internal PUBLIC ENABLE_PALM)
+    target_include_directories(rwkv_mobile_internal PUBLIC
+        src/backends/palm
+        "${PALM_INFRA_SOURCE_DIR}"
+    )
+    target_link_libraries(rwkv_mobile_internal PUBLIC mollm_lib)
+endif()
+
 if (ENABLE_VISION)
     target_include_directories(rwkv_mobile_internal PUBLIC src/multimodal/vision)
     target_compile_definitions(rwkv_mobile_internal PUBLIC ENABLE_VISION)
@@ -656,7 +716,7 @@ if (ENABLE_LLAMACPP_BACKEND)
     find_package(OpenMP)
     if (OpenMP_FOUND)
         if (ANDROID)
-            target_link_libraries(rwkv_mobile_internal PUBLIC -static-openmp)
+            target_link_libraries(rwkv_mobile_internal PUBLIC -fopenmp -static-openmp)
         elseif(NOT IOS)
             target_link_libraries(rwkv_mobile_internal PUBLIC OpenMP::OpenMP_CXX)
         endif()
@@ -873,7 +933,7 @@ else()
         target_compile_definitions(rwkv_mobile PRIVATE _DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
     endif()
     if (ANDROID)
-        target_link_libraries(rwkv_mobile PRIVATE -static-openmp)
+        target_link_libraries(rwkv_mobile PRIVATE -fopenmp -static-openmp)
     endif()
     if (ENABLE_WEBRWKV_BACKEND)
         target_link_libraries(rwkv_mobile PRIVATE ${WEBRWKV_FFI_LIB} ${WEBRWKV_EXTRA_LIBS})
