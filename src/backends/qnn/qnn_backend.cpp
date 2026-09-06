@@ -1560,7 +1560,8 @@ int qnn_backend::setup_output_tensors_for_graph(int graph_id, int total_graphs_c
     Qnn_Tensor_t* hiddenStateTensorToUse = isPrefill ? hiddenStateTensorPrefill : hiddenStateTensor;
     const bool forceCarryCopy = forceCrossContextCopy();
 
-    if ((logitsOutputTensor != nullptr && graph_id == total_graphs_count - 1) || (hiddenStateTensorToUse != nullptr && graph_id != total_graphs_count - 1)) {
+    // The first prefill graph also shares recurrent state with decode graphs.
+    if ((logitsOutputTensor != nullptr && (isPrefill || graph_id == total_graphs_count - 1)) || (hiddenStateTensorToUse != nullptr && graph_id != total_graphs_count - 1)) {
         // tensors initialized previously; set up with shared tensors
         for (size_t i = 0; i < graphInfo.numOutputTensors; i++) {
             auto tensorName = std::string(QNN_TENSOR_GET_NAME(graphInfo.outputTensors[i]));
@@ -2047,43 +2048,15 @@ int qnn_backend::qnn_initialize_tensors() {
                     return result;
                 }
 
-                // Setup output tensors using helper function (special handling for prefill)
-                if (logitsOutputTensor != nullptr) {
-                    // For prefill graphs, we need special handling of shared tensors
-                    for (size_t i = 0; i < graphInfo.numOutputTensors; i++) {
-                        auto tensorName = std::string(QNN_TENSOR_GET_NAME(graphInfo.outputTensors[i]));
-
-                        if (tensorName.find("v_first") != std::string::npos && vFirstTensorPrefill != nullptr) {
-                            sharedTensorMap[tensorName] = vFirstTensorPrefill;
-                        } else if (tensorName.find("state") != std::string::npos) {
-                            sharedTensorMap[tensorName] = (Qnn_Tensor_t*)stateTensorsNameToTensorPointer[tensorName];
-                        } else if (tensorName.find("out") != std::string::npos) {
-                            if (graph_id == qnnPrefillGraphsCount - 1) {
-                                sharedTensorMap[tensorName] = logitsOutputTensor;
-                            } else if (hiddenStateTensorPrefill != nullptr) {
-                                sharedTensorMap[tensorName] = hiddenStateTensorPrefill;
-                            }
-                        }
-                    }
-
-                    if (!qnnIOTensorUtils->setupOutputWithSharedTensors(&outputTensorsPrefill[graph_id], prefillGraphsTensorNameToTensorPointer[graph_id], graphInfo,
-                            prefillGraphsTensorNameToSize[graph_id], qnnContextHandles[graph_id], sharedTensorMap)) {
-                        LOGE("Error in setting up Output Tensors");
-                        return RWKV_ERROR_IO;
-                    }
-                }
-
-                // Handle tensor assignments for prefill graphs
-                for (size_t i = 0; i < graphInfo.numOutputTensors; i++) {
-                    auto tensorName = std::string(QNN_TENSOR_GET_NAME(graphInfo.outputTensors[i]));
-                    if (tensorName.find("v_first") != std::string::npos && vFirstTensorPrefill == nullptr) {
-                        vFirstTensorPrefill = (Qnn_Tensor_t*)prefillGraphsTensorNameToTensorPointer[graph_id][tensorName];
-                    } else if (tensorName.find("state") == std::string::npos && tensorName.find("out") != std::string::npos) {
-                        if (graph_id != qnnPrefillGraphsCount - 1 && hiddenStateTensorPrefill == nullptr) {
-                            hiddenStateTensorPrefill = (Qnn_Tensor_t*)prefillGraphsTensorNameToTensorPointer[graph_id][tensorName];
-                        }
-                    }
-                }
+                result = setup_output_tensors_for_graph(graph_id, qnnPrefillGraphsCount, graphInfo,
+                    outputTensorsPrefill, prefillGraphsTensorNameToTensorPointer[graph_id],
+                    prefillGraphsTensorNameToSize[graph_id], qnnContextHandles[graph_id],
+                    vFirstTensorPrefill, hiddenStateTensorPrefill, true);
+                if (result != RWKV_SUCCESS) return result;
+                result = re_register_cross_context_shared_outputs(graph_id, graphInfo,
+                    prefillGraphsTensorNameToTensorPointer[graph_id], qnnContextHandles[graph_id],
+                    vFirstTensorPrefill, hiddenStateTensorPrefill);
+                if (result != RWKV_SUCCESS) return result;
 
                 // Populate input tensor name to size map for prefill graphs
                 result = populate_tensor_name_to_size_map(graphInfo, prefillGraphsTensorNameToSize[graph_id], true);
@@ -2094,15 +2067,29 @@ int qnn_backend::qnn_initialize_tensors() {
                 // Populate input shared tensor map using helper function
                 populate_input_shared_tensor_map(graphInfo, graph_id, sharedTensorMap, vFirstTensorPrefill, hiddenStateTensorPrefill, true);
 
+                auto inputSharedTensorMap = prepare_input_shared_tensor_map(
+                    graph_id, sharedTensorMap, vFirstTensorPrefill, hiddenStateTensorPrefill);
                 if (!qnnIOTensorUtils->setupInputWithSharedTensors(&inputTensorsPrefill[graph_id], prefillGraphsTensorNameToTensorPointer[graph_id], graphInfo,
-                                                prefillGraphsTensorNameToSize[graph_id], qnnContextHandles[graph_id], sharedTensorMap)) {
+                                                prefillGraphsTensorNameToSize[graph_id], qnnContextHandles[graph_id], inputSharedTensorMap)) {
                     LOGE("Error in setting up Input Tensors");
                     return RWKV_ERROR_IO;
                 }
+                if (forceCrossContextCopy()) {
+                    result = register_forced_cross_context_input_copies(graph_id, sharedTensorMap,
+                        prefillGraphsTensorNameToTensorPointer[graph_id], qnnContextHandles[graph_id],
+                        vFirstTensorPrefill, hiddenStateTensorPrefill);
+                } else {
+                    result = re_register_cross_context_shared_inputs(graph_id, sharedTensorMap,
+                        prefillGraphsTensorNameToTensorPointer[graph_id], qnnContextHandles[graph_id],
+                        vFirstTensorPrefill, hiddenStateTensorPrefill);
+                }
+                if (result != RWKV_SUCCESS) return result;
 
                 // Map deep embedding tensors using helper function
                 map_deep_embedding_tensors(graphInfo, graph_id, prefillGraphsTensorNameToTensorPointer[graph_id], 
                                          deepEmbeddingPrefillTensors, true);
+                refresh_carry_output_tensors_after_input_setup(graphInfo, graph_id,
+                    qnnPrefillGraphsCount, prefillGraphsTensorNameToTensorPointer[graph_id], true);
             }
 
             if (prefillGraphsTensorNameToTensorPointer[0].find("in_prefill") != prefillGraphsTensorNameToTensorPointer[0].end()) {
