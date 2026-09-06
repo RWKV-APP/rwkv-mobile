@@ -323,6 +323,10 @@ jobs:
       SYMBOLS_PACKAGENAME: librwkv_mobile-${{ needs.setup.outputs.VERSION }}-aarch64-android-ndk-r25c-symbols
     steps:
     - uses: actions/checkout@v4
+    - name: Check chat thinking boundaries
+      run: |
+        g++ -std=c++17 -I src examples/test_chat_thinking.cpp -o /tmp/test_chat_thinking
+        /tmp/test_chat_thinking
     - name: Install Ninja
       run: |
         sudo apt-get install ninja-build

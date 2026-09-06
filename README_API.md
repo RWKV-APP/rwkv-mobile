@@ -117,6 +117,12 @@ name, vision encoder, or chat template. A catalog-owning caller must expose a
 Thinking control only for a model explicitly marked as supporting it, then set
 the model-local prefix through `rwkvmobile_runtime_set_thinking_token`.
 
+For ordinary text chat, a prefilled closing thinking tag may intentionally
+end at `</think`, leaving the final `>` for generation. Treat that prefix as
+the answer stage for initial sampling and stopping. Detect generated
+`</think>` from decoded bytes across token boundaries, including merged
+tokens; single and batched chat use the same boundary rules.
+
 For the configurable Flower-template VL contract, the exact prefixes are
 `<think>` when Thinking is enabled and `<think>\n</think>` when it is disabled.
 Do not add a leading space when `space_after_roles` is false. Older VL models

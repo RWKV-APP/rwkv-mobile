@@ -38,4 +38,17 @@ inline std::string remove_endl(const std::string &msg) {
     return remove_ending_char(msg, '\n');
 }
 
+inline bool has_prefilled_thinking_end(const std::string &prefix) {
+    return prefix.find("</think>") != std::string::npos ||
+           (prefix.size() >= 7 && prefix.compare(prefix.size() - 7, 7, "</think") == 0);
+}
+
+// Match decoded bytes: </think> can cross the prefill boundary or use merged tokens.
+inline bool advance_thinking_end(std::string &suffix, const std::string &decoded) {
+    suffix += decoded;
+    if (suffix.find("</think>") != std::string::npos) return true;
+    if (suffix.size() > 7) suffix.erase(0, suffix.size() - 7);
+    return false;
+}
+
 #endif

@@ -1563,8 +1563,9 @@ int Runtime::chat(int model_id, std::vector<std::string> inputs,
     }
 
     int decoded_idx = 0;
-    bool is_pseudo_thinking = enable_reasoning && model->response_buffer.find("</think>") != std::string::npos;
+    bool is_pseudo_thinking = enable_reasoning && has_prefilled_thinking_end(model->response_buffer);
     bool thinking_end_tag_found = is_pseudo_thinking;
+    std::string thinking_suffix = model->response_buffer;
     bool first_token_ban_thinking_tag = !enable_reasoning || is_pseudo_thinking || force_reasoning;
 
     for (int i = 0; i < max_length; i++) {
@@ -1621,7 +1622,7 @@ int Runtime::chat(int model_id, std::vector<std::string> inputs,
             }
         }
         if (enable_reasoning && !thinking_end_tag_found) {
-            if (compare_token_seq({61, 48, 35762, 63})) {
+            if (advance_thinking_end(thinking_suffix, model->tokenizer->decode(decoded_idx))) {
                 thinking_end_tag_found = true;
             }
         }
@@ -1749,6 +1750,7 @@ int Runtime::chat_batch(int model_id, std::vector<std::vector<std::string>> inpu
     std::vector<bool> is_pseudo_thinking_batch(batch_size, false);
     std::vector<std::any> state_batch(batch_size);
     std::vector<bool> thinking_end_tag_found_batch(batch_size, false);
+    std::vector<std::string> thinking_suffix_batch(batch_size);
     bool reset_speed_stats_for_this_batch = false;
     std::vector<std::vector<float>> prefill_logits_f32_batch(batch_size);
     std::vector<std::vector<float>> logits_final_f32_batch(batch_size);
@@ -1827,8 +1829,9 @@ int Runtime::chat_batch(int model_id, std::vector<std::vector<std::string>> inpu
             }
         }
 
-        is_pseudo_thinking_batch[batch_idx] = !enable_reasoning || (enable_reasoning && model->response_buffer_batch[batch_idx].find("</think>") != std::string::npos);
-        thinking_end_tag_found_batch[batch_idx] = enable_reasoning && model->response_buffer_batch[batch_idx].find("</think>") != std::string::npos;
+        thinking_end_tag_found_batch[batch_idx] = enable_reasoning && has_prefilled_thinking_end(model->response_buffer_batch[batch_idx]);
+        is_pseudo_thinking_batch[batch_idx] = !enable_reasoning || thinking_end_tag_found_batch[batch_idx];
+        thinking_suffix_batch[batch_idx] = model->response_buffer_batch[batch_idx];
     }
 
     size_t common_prefix_len = 0;
@@ -2037,7 +2040,7 @@ int Runtime::chat_batch(int model_id, std::vector<std::vector<std::string>> inpu
                     }
                 }
                 if (enable_reasoning && !thinking_end_tag_found_batch[original_j]) {
-                    if (compare_token_seq({61, 48, 35762, 63})) {
+                    if (advance_thinking_end(thinking_suffix_batch[original_j], model->tokenizer->decode(decoded_idx[j]))) {
                         thinking_end_tag_found_batch[original_j] = true;
                     }
                 }
