@@ -368,6 +368,10 @@ if (ENABLE_LLAMACPP_BACKEND)
     endif()
 
     FetchContent_MakeAvailable(llama_cpp)
+    if (ANDROID)
+        include(cmake/patch_llama_cpp_android_mmap.cmake)
+        rwkv_mobile_patch_llama_cpp_android_mmap("${llama_cpp_SOURCE_DIR}/src/llama-mmap.cpp")
+    endif()
     if (CMAKE_SYSTEM_NAME STREQUAL "OHOS")
         include(cmake/patch_llama_cpp_ohos_affinity.cmake)
         rwkv_mobile_patch_llama_cpp_ohos_affinity(
