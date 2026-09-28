@@ -12,6 +12,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <thread>
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
 #include "rmpack.h"
 #include "pth_loader.h"
 #include "utils.h"
@@ -69,6 +72,58 @@
 #endif
 
 namespace rwkvmobile {
+
+namespace {
+bool decode_profile_enabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("RWKV_MOBILE_PROFILE_DECODE");
+        if (value) return std::strcmp(value, "1") == 0;
+#ifdef __ANDROID__
+        char prop[PROP_VALUE_MAX] = {};
+        __system_property_get("debug.rwkv.engine_profile", prop);
+        return std::strcmp(prop, "1") == 0;
+#else
+        return false;
+#endif
+    }();
+    return enabled;
+}
+
+// Internal timing: one record per decode iteration, plus a whole-call envelope.
+// Android timestamps share CLOCK_MONOTONIC with the NP9 graph diagnostic.
+struct DecodeStepTiming {
+    enum Phase { Penalty, Sample, Schedule, Eval, Logits, Publish, Other, Count };
+    bool enabled = decode_profile_enabled();
+    const char* scope;
+    int model_id, step, active, eval_active = 0;
+    int64_t start = 0, last = 0, ns[Count] = {};
+    static int64_t now() {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+    DecodeStepTiming(const char* scope, int model_id, int step, int active)
+        : scope(scope), model_id(model_id), step(step), active(active) {
+        if (enabled) start = last = now();
+    }
+    void mark(Phase phase) {
+        if (!enabled) return;
+        const auto end = now();
+        ns[phase] += end-last;
+        last = end;
+    }
+    ~DecodeStepTiming() {
+        if (!enabled) return;
+        mark(Other);
+        LOGI("decode_profile scope=%s model=%d step=%d active=%d eval_active=%d start_ns=%lld "
+             "total_ns=%lld penalty_ns=%lld sample_ns=%lld schedule_ns=%lld "
+             "eval_ns=%lld logits_ns=%lld publish_ns=%lld other_ns=%lld\n",
+             scope, model_id, step, active, eval_active, (long long)start, (long long)(last-start),
+             (long long)ns[Penalty], (long long)ns[Sample], (long long)ns[Schedule],
+             (long long)ns[Eval], (long long)ns[Logits], (long long)ns[Publish],
+             (long long)ns[Other]);
+    }
+};
+} // namespace
 
 const int chinese_tokens_start = 10250;
 const int chinese_tokens_end = 18493;
@@ -1353,6 +1408,7 @@ int Runtime::chat(int model_id, std::vector<std::string> inputs,
         return RWKV_ERROR_RUNTIME | RWKV_ERROR_INVALID_PARAMETERS;
     }
     auto &model = _models.at(model_id);
+    DecodeStepTiming call_timing("chat_call", model_id, -1, 1);
     if (model->backend == nullptr || model->tokenizer == nullptr) {
         return RWKV_ERROR_RUNTIME | RWKV_ERROR_INVALID_PARAMETERS;
     }
@@ -1546,6 +1602,7 @@ int Runtime::chat(int model_id, std::vector<std::string> inputs,
     bool first_token_ban_thinking_tag = !enable_reasoning || is_pseudo_thinking || force_reasoning;
 
     for (int i = 0; i < max_length; i++) {
+        DecodeStepTiming timing("chat_step", model_id, i, 1);
         model->sampler->apply_penalties(logits, model->backend->get_num_vocab());
 
         if (i <= 2 && first_token_ban_thinking_tag) {
@@ -1560,11 +1617,16 @@ int Runtime::chat(int model_id, std::vector<std::string> inputs,
             }
         }
 
+        timing.mark(DecodeStepTiming::Penalty);
         decoded_idx = model->sampler->sample(logits, model->backend->get_num_vocab());
+        timing.mark(DecodeStepTiming::Sample);
         if (decoded_idx == 0) {
             LOGD("sampled token 0, stopping generation; eval one more step with EOS for state cache\n");
             int eos_token_id = model->tokenizer->encode(model->eos_token)[0];
+            timing.eval_active = 1;
+            timing.mark(DecodeStepTiming::Schedule);
             ret = eval_logits(model_id, eos_token_id, logits);
+            timing.mark(DecodeStepTiming::Eval);
             if (ret) {
                 model->is_generating = false;
                 LOGE("failed to eval logits with EOS\n");
@@ -1604,12 +1666,15 @@ int Runtime::chat(int model_id, std::vector<std::string> inputs,
             }
         }
 
+        timing.mark(DecodeStepTiming::Schedule);
         if (model->response_buffer_eos_found || model->stop_signal) {
             LOGD("stopping generation, eos_found: %d, stop_signal: %d\n", model->response_buffer_eos_found, model->stop_signal);
             break;
         }
 
+        timing.eval_active = 1;
         ret = eval_logits(model_id, decoded_idx, logits);
+        timing.mark(DecodeStepTiming::Eval);
         if (ret) {
             model->is_generating = false;
             LOGE("failed to eval logits\n");
@@ -1632,6 +1697,7 @@ int Runtime::chat(int model_id, std::vector<std::string> inputs,
         }
 
         model->sampler->update_occurences(decoded_idx);
+        timing.mark(DecodeStepTiming::Publish);
     }
 
     if (response_ids_raw.size() > 0 && max_length > 0) {
@@ -1667,6 +1733,7 @@ int Runtime::chat_batch(int model_id, std::vector<std::vector<std::string>> inpu
         return RWKV_ERROR_RUNTIME | RWKV_ERROR_INVALID_PARAMETERS;
     }
     auto &model = _models.at(model_id);
+    DecodeStepTiming call_timing("batch_call", model_id, -1, batch_size);
     if (model->backend == nullptr || model->tokenizer == nullptr) {
         return RWKV_ERROR_RUNTIME | RWKV_ERROR_INVALID_PARAMETERS;
     }
@@ -1938,6 +2005,7 @@ int Runtime::chat_batch(int model_id, std::vector<std::vector<std::string>> inpu
     }
 
     for (int i = 0; i < max_length; i++) {
+        DecodeStepTiming timing("batch_step", model_id, i, current_batch_size);
         for (int j = 0; j < current_batch_size; j++) {
             int original_j = active_batch_indices[j];
             Tensor1D view = tensor1d_subview(logits, (size_t)j * (size_t)num_vocab, (size_t)num_vocab);
@@ -1958,7 +2026,9 @@ int Runtime::chat_batch(int model_id, std::vector<std::vector<std::string>> inpu
             }
         }
 
+        timing.mark(DecodeStepTiming::Penalty);
         decoded_idx = model->sampler->sample_batch(logits, model->backend->get_num_vocab(), model->backend->get_num_vocab(), current_batch_size);
+        timing.mark(DecodeStepTiming::Sample);
 
         for (int j = 0; j < current_batch_size; j++) {
             int original_j = active_batch_indices[j];
@@ -2112,6 +2182,7 @@ int Runtime::chat_batch(int model_id, std::vector<std::vector<std::string>> inpu
             }
         }
 
+        timing.mark(DecodeStepTiming::Schedule);
         auto all_eos_found = std::all_of(model->response_buffer_eos_found_batch.begin(), model->response_buffer_eos_found_batch.end(), [](bool eos_found) { return eos_found; });
         if (all_eos_found || model->stop_signal) {
             LOGD("stopping generation, eos_found: %d, stop_signal: %d\n", all_eos_found, model->stop_signal);
@@ -2122,9 +2193,12 @@ int Runtime::chat_batch(int model_id, std::vector<std::vector<std::string>> inpu
         for (int j = 0; j < current_batch_size; j++) {
             active_decoded_idx[j] = (decoded_idx[j] == 0) ? eos_token_id : decoded_idx[j];
         }
+        timing.eval_active = current_batch_size;
+        timing.mark(DecodeStepTiming::Schedule);
         if (current_batch_size == 1) {
             Tensor1D single_logits;
             ret = eval_logits(model_id, active_decoded_idx[0], single_logits);
+            timing.mark(DecodeStepTiming::Eval);
             if (ret) {
                 LOGE("chat_batch: single eval failed, ret=%d\n", ret);
             }
@@ -2138,6 +2212,7 @@ int Runtime::chat_batch(int model_id, std::vector<std::vector<std::string>> inpu
             }
         } else {
             ret = eval_logits_batch_decode(model_id, active_decoded_idx, logits);
+            timing.mark(DecodeStepTiming::Eval);
             if (ret) {
                 LOGE("chat_batch: batch eval failed, ret=%d\n", ret);
             } else {
@@ -2150,6 +2225,7 @@ int Runtime::chat_batch(int model_id, std::vector<std::vector<std::string>> inpu
                 }
             }
         }
+        timing.mark(DecodeStepTiming::Logits);
         if (ret) {
             model->is_generating = false;
             LOGE("failed to eval logits\n");
@@ -2186,6 +2262,8 @@ int Runtime::chat_batch(int model_id, std::vector<std::vector<std::string>> inpu
 
             occurences_batch[original_j][decoded_idx[j]]++;
         }
+
+        timing.mark(DecodeStepTiming::Publish);
 
         // TODO: callback_batch
         // if (callback_batch) {

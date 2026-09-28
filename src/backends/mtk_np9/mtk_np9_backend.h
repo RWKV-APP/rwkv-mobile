@@ -53,8 +53,8 @@ public:
 private:
     MtkRwkvDlopen _library;
     void* _runtime = nullptr;
-    std::vector<float> _logits_buffer;
-    Tensor1D _logits_fp16_view;
+    std::vector<half_float::half> _logits_buffer;
+    void copy_logits(const void* source, size_t count, Tensor1D& logits);
     double _prefill_speed = -1;
     double _decode_speed = -1;
     int _prefill_seq_len = 0;
