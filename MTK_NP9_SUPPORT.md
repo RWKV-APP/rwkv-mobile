@@ -193,7 +193,7 @@ std::shared_ptr<std::vector<std::vector<uint8_t>>>
 
 ## Logits Type
 
-The NP9 runtime returns FP16 logits. The backend returns a `Tensor1D` FP16 view directly to avoid converting the full vocabulary to FP32 on every token. Callers that need FP32 should use `tensor1d_get_f32` or convert only where required.
+The NP9 runtime returns FP16 logits in uncached device-shared memory. The backend bulk-copies them into a reusable CPU buffer and returns a `Tensor1D` FP16 view of that buffer. This avoids repeated scalar reads from uncached memory without changing dtype or values. The view remains borrowed and is valid until the next evaluation or backend destruction. Callers that need FP32 convert only where required.
 
 ## Validation Commands
 

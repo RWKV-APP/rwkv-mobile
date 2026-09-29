@@ -347,6 +347,14 @@ int mtk_np9_backend::load_model(std::string model_path, void * extra) {
     return RWKV_SUCCESS;
 }
 
+void mtk_np9_backend::copy_logits(const void* source, size_t count, Tensor1D& logits) {
+    // NP9 outputs reside in uncached device-shared memory. Bulk-copy once before
+    // CPU sampling/conversion; scalar reads from that mapping are expensive.
+    _logits_buffer.resize(count);
+    std::memcpy(_logits_buffer.data(), source, count * sizeof(half_float::half));
+    logits = Tensor1D::make(_logits_buffer.data(), TensorDType::F16, count);
+}
+
 int mtk_np9_backend::eval(int id, Tensor1D & logits) {
     if (_runtime == nullptr) {
         return RWKV_ERROR_RUNTIME | RWKV_ERROR_INVALID_PARAMETERS;
@@ -362,12 +370,7 @@ int mtk_np9_backend::eval(int id, Tensor1D & logits) {
         _decode_speed = 1000000.0 / (double)duration_us;
     }
 
-    // RWKV MTK runtime returns fp16 logits buffer.
-    _logits_fp16_view = Tensor1D::make(logits_ptr, TensorDType::F16, (size_t)vocab_size);
-
-    // Prefer returning fp16 logits to avoid an expensive full-vocab conversion.
-    // Callers that require fp32 can convert on-demand (e.g. before sampling).
-    logits = _logits_fp16_view;
+    copy_logits(logits_ptr, (size_t)vocab_size, logits);
     return RWKV_SUCCESS;
 }
 
@@ -418,8 +421,7 @@ int mtk_np9_backend::eval(std::vector<int> ids, Tensor1D & logits) {
         _decode_speed = (double)decode_tokens * 1000000.0 / (double)decode_duration_us;
     }
 
-    _logits_fp16_view = Tensor1D::make(logits_ptr, TensorDType::F16, (size_t)vocab_size);
-    logits = _logits_fp16_view;
+    copy_logits(logits_ptr, (size_t)vocab_size, logits);
     return RWKV_SUCCESS;
 }
 
@@ -456,8 +458,7 @@ int mtk_np9_backend::eval_batch(std::vector<std::vector<int>> ids, Tensor1D & lo
         _decode_speed = (double)ids.size() * 1000000.0 / (double)duration_us;
     }
 
-    _logits_fp16_view = Tensor1D::make(logits_ptr, TensorDType::F16, (size_t)vocab_size * ids.size());
-    logits = _logits_fp16_view;
+    copy_logits(logits_ptr, (size_t)vocab_size * ids.size(), logits);
     return RWKV_SUCCESS;
 }
 
@@ -512,8 +513,7 @@ int mtk_np9_backend::eval_with_embeddings(const float *embeddings, int n_tokens,
         _decode_speed = (double)decode_tokens * 1000000.0 / (double)decode_duration_us;
     }
 
-    _logits_fp16_view = Tensor1D::make(logits_ptr, TensorDType::F16, (size_t)vocab_size);
-    logits = _logits_fp16_view;
+    copy_logits(logits_ptr, (size_t)vocab_size, logits);
     return RWKV_SUCCESS;
 }
 
