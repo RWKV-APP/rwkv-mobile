@@ -1,0 +1,93 @@
+--- a/src/tensor/matrix.rs
++++ b/src/tensor/matrix.rs
+@@ -81,6 +81,7 @@
+ #[serde_seed(seed = "Seed", context = "Context")]
+ pub enum Matrix {
+     Fp16(TensorGpu<f16, ReadWrite>),
++    Fp16Chunks(Vec<TensorGpu<f16, ReadWrite>>),
+     Int8 {
+         w: TensorGpu<u8, ReadWrite>,
+         m: TensorGpu<f16, ReadWrite>,
+@@ -94,6 +95,43 @@
+ }
+ 
+ impl Matrix {
++    pub async fn split_fp16(&mut self) -> Result<(), TensorError> {
++        let Self::Fp16(matrix) = self else { return Ok(()); };
++        let shape = matrix.shape();
++        let limit = matrix.context().device.limits().max_storage_buffer_binding_size as usize;
++        if shape.len() * 2 <= limit { return Ok(()); }
++        let rows = (limit / (shape[0] * 2) / 8) * 8;
++        assert!(rows > 0 && shape[2] == 1 && shape[3] == 1);
++        let cpu = matrix.back().await;
++        let context = matrix.context().clone();
++        let mut chunks = Vec::new();
++        for start in (0..shape[1]).step_by(rows) {
++            let data = cpu.slice(.., start..(start + rows).min(shape[1]), .., ..)?;
++            chunks.push(data.to(&context));
++        }
++        *self = Self::Fp16Chunks(chunks);
++        Ok(())
++    }
++
++    fn chunks_op<F0: Float, F1: Float>(chunks: &[TensorGpu<f16, ReadWrite>], input: TensorGpuView<'_, F0>, output: TensorGpuView<'_, F1>, act: Activation, turbo: bool, sparse: bool) -> Result<TensorOp, TensorError> {
++        output.tensor().check_shape(output.shape())?;
++        let mut ops = Vec::new();
++        let mut start = 0;
++        for matrix in chunks {
++            let end = start + matrix.shape()[1];
++            let view = output.tensor().view(start..end, .., .., ..)?;
++            let op = if turbo {
++                TensorOp::matmul_mat_fp16(matrix, input.clone(), view, act)?
++            } else {
++                TensorOp::matmul_vec_fp16(matrix, input.clone(), view, act, sparse)?
++            };
++            ops.push(op);
++            start = end;
++        }
++        assert_eq!(start, output.shape()[0]);
++        Ok(TensorOp::List(ops))
++    }
++
+     pub fn matmul_vec_op<'a, 'b, F0: Float, F1: Float>(
+         &self,
+         input: impl Into<TensorGpuView<'a, F0>>,
+@@ -102,6 +140,7 @@
+     ) -> Result<TensorOp, TensorError> {
+         match self {
+             Matrix::Fp16(matrix) => TensorOp::matmul_vec_fp16(matrix, input, output, act, false),
++            Matrix::Fp16Chunks(chunks) => Self::chunks_op(chunks, input.into(), output.into(), act, false, false),
+             Matrix::Int8 { w, m } => TensorOp::matmul_vec_int8(w, m, input, output, act, false),
+             Matrix::Fp4 { w, q, m } => TensorOp::matmul_vec_nf4(w, q, m, input, output, act, false),
+         }
+@@ -115,6 +154,7 @@
+     ) -> Result<TensorOp, TensorError> {
+         match self {
+             Matrix::Fp16(matrix) => TensorOp::matmul_vec_fp16(matrix, input, output, act, true),
++            Matrix::Fp16Chunks(chunks) => Self::chunks_op(chunks, input.into(), output.into(), act, false, true),
+             Matrix::Int8 { w, m } => TensorOp::matmul_vec_int8(w, m, input, output, act, true),
+             Matrix::Fp4 { w, q, m } => TensorOp::matmul_vec_nf4(w, q, m, input, output, act, true),
+         }
+@@ -128,6 +168,7 @@
+     ) -> Result<TensorOp, TensorError> {
+         match self {
+             Matrix::Fp16(matrix) => TensorOp::matmul_mat_fp16(matrix, input, output, act),
++            Matrix::Fp16Chunks(chunks) => Self::chunks_op(chunks, input.into(), output.into(), act, true, false),
+             Matrix::Int8 { w, m } => TensorOp::matmul_mat_int8(w, m, input, output, act),
+             Matrix::Fp4 { w, q, m } => TensorOp::matmul_mat_nf4(w, q, m, input, output, act),
+         }
+--- a/src/runtime/model.rs
++++ b/src/runtime/model.rs
+@@ -198,6 +198,9 @@
+             .max(info.max_non_head_buffer_size())
+             .max(info.head_buffer_size())
+             as u32;
+-        self
+-    }
+-}
++        if info.version == ModelVersion::V7 {
++            self.limits.max_storage_buffer_binding_size = self.limits.max_storage_buffer_binding_size.min(self.adapter.limits().max_storage_buffer_binding_size);
++        }
++        self
++    }
++}

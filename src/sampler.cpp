@@ -117,7 +117,36 @@ int NucleusSampler::sample(const Tensor1D & logits, const size_t size, float tem
 
     if (top_k == 1 || std::fabs(top_p - 0.f) < 1e-4f) {
         if (logits.dtype == TensorDType::F16) {
-            return std::max_element(static_cast<const half_float::half*>(logits.data_ptr), static_cast<const half_float::half*>(logits.data_ptr) + size) - static_cast<const half_float::half*>(logits.data_ptr);
+            const auto* data = static_cast<const half_float::half*>(logits.data_ptr);
+#if defined(__aarch64__) || defined(_M_ARM64)
+            float best = float(data[0]);
+            size_t index = 0;
+            size_t i = 1;
+            for (; i + 4 <= size; i += 4) {
+                uint16x4_t bits;
+                std::memcpy(&bits, data + i, sizeof(bits));
+                const float32x4_t values = vcvt_f32_f16(vreinterpret_f16_u16(bits));
+                if (vmaxvq_u32(vcgtq_f32(values, vdupq_n_f32(best))) == 0) continue;
+                float lanes[4];
+                vst1q_f32(lanes, values);
+                // Visit candidates in order to preserve the first maximum, including ties.
+                for (size_t lane = 0; lane < 4; ++lane) {
+                    if (lanes[lane] > best) {
+                        best = lanes[lane];
+                        index = i + lane;
+                    }
+                }
+            }
+            for (; i < size; ++i) {
+                if (float(data[i]) > best) {
+                    best = float(data[i]);
+                    index = i;
+                }
+            }
+            return static_cast<int>(index);
+#else
+            return std::max_element(data, data + size) - data;
+#endif
         } else if (logits.dtype == TensorDType::F32) {
             return std::max_element(static_cast<const float*>(logits.data_ptr), static_cast<const float*>(logits.data_ptr) + size) - static_cast<const float*>(logits.data_ptr);
         } else {

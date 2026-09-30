@@ -164,6 +164,20 @@ int llama_cpp_backend::load_model(std::string model_path, void * extra) {
     ctx_params.n_ctx = n_ctx_per_seq * (uint32_t) kMaxBatchSlots;
     ctx_params.n_seq_max = kMaxBatchSlots;
     ctx_params.kv_unified = false;
+#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__) && !defined(__OHOS__))
+    if (model_params.n_gpu_layers == 0) {
+        const unsigned int available = std::max(1u, std::thread::hardware_concurrency());
+        ctx_params.n_threads = ctx_params.n_threads_batch = static_cast<int>(std::min(12u, available));
+    }
+#endif
+    if (const char *value = std::getenv("RWKV_LLAMACPP_THREADS")) {
+        errno = 0;
+        char *end = nullptr;
+        const long requested = std::strtol(value, &end, 10);
+        if (errno == 0 && end != value && *end == '\0' && requested > 0 && requested <= GGML_MAX_N_THREADS) {
+            ctx_params.n_threads = ctx_params.n_threads_batch = static_cast<int>(requested);
+        }
+    }
 #if defined(__ANDROID__) || defined(__OHOS__)
     if (const char * value = std::getenv("RWKV_LLAMACPP_UBATCH")) {
         errno = 0;
