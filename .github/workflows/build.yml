@@ -319,8 +319,8 @@ jobs:
     needs: [setup]
     runs-on: ubuntu-latest
     env:
-      PACKAGENAME: librwkv_mobile-${{ needs.setup.outputs.VERSION }}-aarch64-android-ndk-r25c
-      SYMBOLS_PACKAGENAME: librwkv_mobile-${{ needs.setup.outputs.VERSION }}-aarch64-android-ndk-r25c-symbols
+      PACKAGENAME: librwkv_mobile-${{ needs.setup.outputs.VERSION }}-aarch64-android-ndk-r28c
+      SYMBOLS_PACKAGENAME: librwkv_mobile-${{ needs.setup.outputs.VERSION }}-aarch64-android-ndk-r28c-symbols
     steps:
     - uses: actions/checkout@v4
     - name: Check chat thinking boundaries
@@ -330,13 +330,13 @@ jobs:
     - name: Install Ninja
       run: |
         sudo apt-get install ninja-build
-    - name: ndk-r25c
+    - name: ndk-r28c
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
         sudo apt-get update
-        wget -q https://dl.google.com/android/repository/android-ndk-r25c-linux.zip -O $GITHUB_WORKSPACE/android-ndk-r25c-linux.zip
-        cd $GITHUB_WORKSPACE && unzip -q android-ndk-r25c-linux.zip
+        wget -q https://dl.google.com/android/repository/android-ndk-r28c-linux.zip -O $GITHUB_WORKSPACE/android-ndk-r28c-linux.zip
+        cd $GITHUB_WORKSPACE && unzip -q android-ndk-r28c-linux.zip
     - name: build
       run: |
         rustup target add --toolchain stable-x86_64-unknown-linux-gnu aarch64-linux-android
@@ -345,12 +345,12 @@ jobs:
         mkdir build && cd build
         cmake .. -DENABLE_NCNN_BACKEND=ON -DENABLE_WEBRWKV_BACKEND=ON -DENABLE_QNN_BACKEND=ON -DENABLE_MTK_NP7_BACKEND=ON -DENABLE_MTK_NP9_BACKEND=ON -DENABLE_PALM_BACKEND=ON \
           -DENABLE_TTS=ON -DENABLE_VISION=ON -DENABLE_WHISPER=ON -DBUILD_EXAMPLES=OFF -DENABLE_SERVER=OFF \
-          -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-28 -DANDROID_NDK=$GITHUB_WORKSPACE/android-ndk-r25c \
-          -DCMAKE_TOOLCHAIN_FILE=$GITHUB_WORKSPACE/android-ndk-r25c/build/cmake/android.toolchain.cmake -DCMAKE_BUILD_TYPE=Release -DRWKV_MOBILE_ENABLE_DEBUG_SYMBOLS=ON \
+          -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-28 -DANDROID_NDK=$GITHUB_WORKSPACE/android-ndk-r28c \
+          -DCMAKE_TOOLCHAIN_FILE=$GITHUB_WORKSPACE/android-ndk-r28c/build/cmake/android.toolchain.cmake -DCMAKE_BUILD_TYPE=Release -DRWKV_MOBILE_ENABLE_DEBUG_SYMBOLS=ON \
           -G Ninja
         ninja
         mkdir -p "$GITHUB_WORKSPACE/symbols/android-arm64-v8a"
-        LLVM_TOOLCHAIN="$GITHUB_WORKSPACE/android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64/bin"
+        LLVM_TOOLCHAIN="$GITHUB_WORKSPACE/android-ndk-r28c/toolchains/llvm/prebuilt/linux-x86_64/bin"
         "$LLVM_TOOLCHAIN/llvm-objcopy" --only-keep-debug --compress-debug-sections=zlib librwkv_mobile.so "$GITHUB_WORKSPACE/symbols/android-arm64-v8a/librwkv_mobile.so.debug"
         "$LLVM_TOOLCHAIN/llvm-objcopy" --only-keep-debug --compress-debug-sections=zlib librwkv_mtk_np7.so "$GITHUB_WORKSPACE/symbols/android-arm64-v8a/librwkv_mtk_np7.so.debug"
         "$LLVM_TOOLCHAIN/llvm-objcopy" --only-keep-debug --compress-debug-sections=zlib librwkv_mtk_np9.so "$GITHUB_WORKSPACE/symbols/android-arm64-v8a/librwkv_mtk_np9.so.debug"
@@ -364,8 +364,8 @@ jobs:
         # mkdir build-debug && cd build-debug
         # cmake .. -DENABLE_NCNN_BACKEND=ON -DENABLE_WEBRWKV_BACKEND=ON -DENABLE_QNN_BACKEND=ON -DENABLE_MTK_NP7_BACKEND=ON -DENABLE_MTK_NP9_BACKEND=ON \
         #   -DENABLE_TTS=ON -DENABLE_VISION=ON -DENABLE_WHISPER=ON -DBUILD_EXAMPLES=OFF -DENABLE_SERVER=OFF \
-        #   -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-28 -DANDROID_NDK=$GITHUB_WORKSPACE/android-ndk-r25c \
-        #   -DCMAKE_TOOLCHAIN_FILE=$GITHUB_WORKSPACE/android-ndk-r25c/build/cmake/android.toolchain.cmake -DCMAKE_BUILD_TYPE=Debug \
+        #   -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-28 -DANDROID_NDK=$GITHUB_WORKSPACE/android-ndk-r28c \
+        #   -DCMAKE_TOOLCHAIN_FILE=$GITHUB_WORKSPACE/android-ndk-r28c/build/cmake/android.toolchain.cmake -DCMAKE_BUILD_TYPE=Debug \
         #   -G Ninja
         # ninja
     - name: package
@@ -550,11 +550,11 @@ jobs:
       - name: download-android
         uses: actions/download-artifact@v4
         with:
-          name: librwkv_mobile-${{ needs.setup.outputs.VERSION }}-aarch64-android-ndk-r25c
+          name: librwkv_mobile-${{ needs.setup.outputs.VERSION }}-aarch64-android-ndk-r28c
       # - name: download-android-debug
       #   uses: actions/download-artifact@v4
       #   with:
-      #     name: librwkv_mobile-${{ needs.setup.outputs.VERSION }}-aarch64-android-ndk-r25c-debug
+      #     name: librwkv_mobile-${{ needs.setup.outputs.VERSION }}-aarch64-android-ndk-r28c-debug
 
       - name: download-linux-x64
         uses: actions/download-artifact@v4
@@ -589,7 +589,7 @@ jobs:
       - name: download-android-symbols
         uses: actions/download-artifact@v4
         with:
-          name: librwkv_mobile-${{ needs.setup.outputs.VERSION }}-aarch64-android-ndk-r25c-symbols
+          name: librwkv_mobile-${{ needs.setup.outputs.VERSION }}-aarch64-android-ndk-r28c-symbols
 
       - name: download-linux-x64-symbols
         uses: actions/download-artifact@v4
@@ -617,7 +617,7 @@ jobs:
           mkdir -p all-symbols
           unzip -q librwkv_mobile-${{ needs.setup.outputs.VERSION }}-ios-static-symbols.zip -d all-symbols
           unzip -q librwkv_mobile-${{ needs.setup.outputs.VERSION }}-macos-aarch64-symbols.zip -d all-symbols
-          unzip -q librwkv_mobile-${{ needs.setup.outputs.VERSION }}-aarch64-android-ndk-r25c-symbols.zip -d all-symbols
+          unzip -q librwkv_mobile-${{ needs.setup.outputs.VERSION }}-aarch64-android-ndk-r28c-symbols.zip -d all-symbols
           unzip -q librwkv_mobile-${{ needs.setup.outputs.VERSION }}-linux-x86_64-symbols.zip -d all-symbols
           unzip -q librwkv_mobile-${{ needs.setup.outputs.VERSION }}-linux-aarch64-symbols.zip -d all-symbols
           unzip -q librwkv_mobile-${{ needs.setup.outputs.VERSION }}-windows-x64-symbols.zip -d all-symbols
@@ -633,8 +633,8 @@ jobs:
           # mv librwkv_mobile-${{ needs.setup.outputs.VERSION }}-ios-static-debug.zip librwkv_mobile-dev-latest-ios-static-debug.zip
           mv librwkv_mobile-${{ needs.setup.outputs.VERSION }}-macos-aarch64.zip librwkv_mobile-dev-latest-macos.zip
           # mv librwkv_mobile-${{ needs.setup.outputs.VERSION }}-macos-aarch64-debug.zip librwkv_mobile-dev-latest-macos-debug.zip
-          mv librwkv_mobile-${{ needs.setup.outputs.VERSION }}-aarch64-android-ndk-r25c.zip librwkv_mobile-dev-latest-aarch64-android-ndk-r25c.zip
-          # mv librwkv_mobile-${{ needs.setup.outputs.VERSION }}-aarch64-android-ndk-r25c-debug.zip librwkv_mobile-dev-latest-aarch64-android-ndk-r25c-debug.zip
+          mv librwkv_mobile-${{ needs.setup.outputs.VERSION }}-aarch64-android-ndk-r28c.zip librwkv_mobile-dev-latest-aarch64-android-ndk-r28c.zip
+          # mv librwkv_mobile-${{ needs.setup.outputs.VERSION }}-aarch64-android-ndk-r28c-debug.zip librwkv_mobile-dev-latest-aarch64-android-ndk-r28c-debug.zip
           mv librwkv_mobile-${{ needs.setup.outputs.VERSION }}-linux-x86_64.zip librwkv_mobile-dev-latest-linux-x86_64.zip
           mv librwkv_mobile-${{ needs.setup.outputs.VERSION }}-linux-aarch64.zip librwkv_mobile-dev-latest-linux-aarch64.zip
           mv librwkv_mobile-${{ needs.setup.outputs.VERSION }}-windows-x64.zip librwkv_mobile-dev-latest-windows-x64.zip
@@ -650,7 +650,7 @@ jobs:
           files: |
             librwkv_mobile-dev-latest-ios-static.zip
             librwkv_mobile-dev-latest-macos.zip
-            librwkv_mobile-dev-latest-aarch64-android-ndk-r25c.zip
+            librwkv_mobile-dev-latest-aarch64-android-ndk-r28c.zip
             librwkv_mobile-dev-latest-linux-x86_64.zip
             librwkv_mobile-dev-latest-linux-aarch64.zip
             librwkv_mobile-dev-latest-windows-x64.zip
@@ -665,7 +665,7 @@ jobs:
           files: |
             librwkv_mobile-${{ needs.setup.outputs.VERSION }}-ios-static.zip
             librwkv_mobile-${{ needs.setup.outputs.VERSION }}-macos-aarch64.zip
-            librwkv_mobile-${{ needs.setup.outputs.VERSION }}-aarch64-android-ndk-r25c.zip
+            librwkv_mobile-${{ needs.setup.outputs.VERSION }}-aarch64-android-ndk-r28c.zip
             librwkv_mobile-${{ needs.setup.outputs.VERSION }}-linux-x86_64.zip
             librwkv_mobile-${{ needs.setup.outputs.VERSION }}-linux-aarch64.zip
             librwkv_mobile-${{ needs.setup.outputs.VERSION }}-windows-x64.zip

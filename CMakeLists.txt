@@ -451,10 +451,9 @@ if (ENABLE_WHISPER OR ENABLE_TTS)
     endif()
     FetchContent_Declare(
         Eigen
-        GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
-        GIT_TAG 3.3
-        GIT_SHALLOW TRUE
-        GIT_PROGRESS TRUE
+        URL https://gitlab.com/api/v4/projects/libeigen%2Feigen/repository/archive.tar.gz?sha=5e8edd21863b8321fc6b9c82322e6cc8cfc47c14
+        URL_HASH SHA256=abfa4e28cd4efc62c33d43b1af909bfbb3623e0a83866c7b4e75ba6e700bf4ec
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     )
     # note: To disable eigen tests,
     # you should put this code in a add_subdirectory to avoid to change
@@ -546,8 +545,9 @@ endif()
 if (ENABLE_WEBRWKV_BACKEND)
     FetchContent_Declare(
         bzip2
-        GIT_REPOSITORY https://gitlab.com/bzip2/bzip2
-        GIT_TAG master
+        URL https://gitlab.com/api/v4/projects/bzip2%2Fbzip2/repository/archive.tar.gz?sha=66c46b8c9436613fd81bc5d03f63a61933a4dcc3
+        URL_HASH SHA256=f8d336c718c2a6b5c17682f976ce51534b484a58c1eed84f1df06e519f06c82c
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     )
     option(ENABLE_STATIC_LIB "" ON)
     option(ENABLE_STATIC_LIB_IS_PIC "" ON)
