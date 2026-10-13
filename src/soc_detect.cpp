@@ -16,7 +16,7 @@
 #include <windows.h>
 #endif
 
-#ifdef __linux__
+#if defined(__linux__) || defined(__OHOS__)
 #include <dirent.h>
 #include <vector>
 #endif
@@ -293,7 +293,7 @@ const char * soc_detect::get_htp_arch() {
 // From MNN
 const std::vector<CPUGroup> get_cpu_groups() {
     std::vector<CPUGroup> cpu_groups;
-#ifdef __linux__
+#if defined(__linux__) || defined(__OHOS__)
     auto read_number = [](std::string &buffer) -> std::vector<int> {
         std::vector<int> numbers;
         std::stringstream ss(buffer);

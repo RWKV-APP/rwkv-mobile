@@ -16,7 +16,7 @@
 namespace rwkvmobile {
 
 namespace {
-#ifdef ANDROID
+#if defined(ANDROID) || defined(__OHOS__)
 constexpr int kMaxSamplerThreads = 4;
 #else
 constexpr int kMaxSamplerThreads = 8;
