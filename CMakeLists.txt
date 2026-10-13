@@ -29,7 +29,7 @@ option(ENABLE_MLX_BACKEND "Enable MLX backend" OFF)
 option(ENABLE_PALM_BACKEND "Enable Palm-Infra CPU backend" OFF)
 set(PALM_INFRA_DIR "" CACHE PATH
     "Optional path to a local Palm-Infra source tree")
-set(PALM_INFRA_GIT_TAG "3da00340257369c686dd30f7077cf2e5a9293e6c" CACHE STRING
+set(PALM_INFRA_GIT_TAG "a03fcf7a46ab334ada5b8b32bad83e03a1306cb2" CACHE STRING
     "Pinned Palm-Infra source revision")
 
 option(ENABLE_VISION "Enable vision" OFF)
@@ -165,6 +165,18 @@ if (ENABLE_WEBRWKV_BACKEND)
         )
         FetchContent_MakeAvailable(Corrosion)
 
+        FetchContent_Declare(web_rwkv
+            URL https://static.crates.io/crates/web-rwkv/web-rwkv-0.10.15.crate
+            URL_HASH SHA256=45d2c853114d4fcae66b5232f89baa5a89a6866a1789239e3cd47614cbe21462
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        )
+        FetchContent_MakeAvailable(web_rwkv)
+        set(SOURCE_DIR "${web_rwkv_SOURCE_DIR}")
+        set(PATCH_FILE "${CMAKE_CURRENT_SOURCE_DIR}/cmake/patches/web_rwkv_head_bindings.patch")
+        include(cmake/apply_dependency_patch.cmake)
+        set(PATCH_FILE "${CMAKE_CURRENT_SOURCE_DIR}/cmake/patches/web_rwkv_nf4_mobile.patch")
+        include(cmake/apply_dependency_patch.cmake)
+
         FetchContent_Declare(
             web_rwkv_ffi
             GIT_REPOSITORY https://github.com/MollySophia/web-rwkv-ffi
@@ -172,8 +184,14 @@ if (ENABLE_WEBRWKV_BACKEND)
         )
         FetchContent_MakeAvailable(web_rwkv_ffi)
 
+        set(SOURCE_DIR "${web_rwkv_ffi_SOURCE_DIR}")
+        set(PATCH_FILE "${CMAKE_CURRENT_SOURCE_DIR}/cmake/patches/web_rwkv_ffi_head_bindings.patch")
+        include(cmake/apply_dependency_patch.cmake)
+
         corrosion_import_crate(MANIFEST_PATH ${web_rwkv_ffi_SOURCE_DIR}/Cargo.toml
             CRATE_TYPES staticlib)
+        corrosion_set_cargo_flags(web_rwkv_ffi
+            "--config=patch.crates-io.web-rwkv.path=\"${web_rwkv_SOURCE_DIR}\"")
     endif()
 
 endif()
@@ -278,7 +296,7 @@ if (ENABLE_PALM_BACKEND)
     else()
         FetchContent_Declare(
             palm_infra
-            GIT_REPOSITORY https://github.com/HaloWang/Palm-Infra.git
+            GIT_REPOSITORY https://github.com/RWKV-APP/Palm-Infra.git
             GIT_TAG ${PALM_INFRA_GIT_TAG}
             GIT_SHALLOW FALSE
             PATCH_COMMAND "${CMAKE_COMMAND}"
@@ -363,10 +381,14 @@ if (ENABLE_LLAMACPP_BACKEND)
         set(GGML_AVX512_VNNI OFF CACHE BOOL "ggml: enable AVX512-VNNI" FORCE)
         set(GGML_AVX512_BF16 OFF CACHE BOOL "ggml: enable AVX512-BF16" FORCE)
     endif()
-    if ((WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux") AND CMAKE_SIZEOF_VOID_P EQUAL 8 AND ENABLE_LLAMACPP_VULKAN)
+    if ((WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR ANDROID) AND CMAKE_SIZEOF_VOID_P EQUAL 8 AND ENABLE_LLAMACPP_VULKAN)
         option(GGML_VULKAN "" ON)
     endif()
 
+    if (ANDROID)
+        # Use ggml's pthread pool: NDK libomp can abort on Android affinity initialization.
+        set(GGML_OPENMP OFF CACHE BOOL "ggml: use OpenMP" FORCE)
+    endif()
     FetchContent_MakeAvailable(llama_cpp)
     if (ANDROID)
         include(cmake/patch_llama_cpp_android_mmap.cmake)
