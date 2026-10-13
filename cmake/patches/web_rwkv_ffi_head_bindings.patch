@@ -1,0 +1,77 @@
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -59,6 +59,18 @@
+     state: Arc<dyn State + Sync + Send + 'static>,
+     context: Context,
+     tokio: Arc<tokio::runtime::Runtime>,
++}
++
++
++// Bound the prefill dispatch on devices whose output head needs split bindings.
++fn prefill_chunk_size(runtime: &WktvRuntime) -> usize {
++    if runtime.info.version == ModelVersion::V7
++        && runtime.info.head_buffer_size() > runtime.context.device.limits().max_storage_buffer_binding_size as usize
++    {
++        32
++    } else {
++        128
++    }
+ }
+ 
+ fn make_hooks_extended_v6<F: Float>(info: &ModelInfo) -> Result<v6::HookMap<F>> {
+@@ -425,7 +437,8 @@
+             ModelVersion::V7 => {
+                 if fp16 {
+                     let seed: Seed<_, v7::Model> = Seed::new(&context);
+-                    let model = seed.deserialize(&mut deserializer)?;
++                    let mut model: v7::Model = seed.deserialize(&mut deserializer)?;
++                    model.tensor.head.w.split_fp16().await?;
+                     let bundle = v7::Bundle::<f16>::new(model, batch);
+                     let state = Arc::new(bundle.state());
+                     let runtime = TokioRuntime::new(bundle).await;
+@@ -439,7 +452,8 @@
+                     }
+                 } else {
+                     let seed: Seed<_, v7::Model> = Seed::new(&context);
+-                    let model = seed.deserialize(&mut deserializer)?;
++                    let mut model: v7::Model = seed.deserialize(&mut deserializer)?;
++                    model.tensor.head.w.split_fp16().await?;
+                     let bundle = v7::Bundle::<f32>::new(model, batch);
+                     let state = Arc::new(bundle.state());
+                     let runtime = TokioRuntime::new(bundle).await;
+@@ -1471,7 +1485,7 @@
+                 tokens,
+                 option: RnnOption::Last,
+             }],
+-            128,
++            prefill_chunk_size(&runtime),
+         ));
+         let output = loop {
+             let input = inference.take().unwrap();
+@@ -1682,7 +1696,7 @@
+                 tokens: tokens.to_vec(),
+                 option: RnnOption::Last,
+             }],
+-            128,
++            prefill_chunk_size(&runtime),
+         ));
+         loop {
+             let input = inference.take().unwrap();
+@@ -1747,7 +1761,7 @@
+                 .into_iter()
+                 .map(|t| RnnInputBatch::new(t, RnnOption::Last))
+                 .collect(),
+-            128,
++            prefill_chunk_size(&runtime),
+         ));
+         loop {
+             let input = inference.take().unwrap();
+@@ -1805,7 +1819,7 @@
+                 tokens: tokens.to_vec(),
+                 option: RnnOption::Full,
+             }],
+-            128,
++            prefill_chunk_size(&runtime),
+         ));
+         let mut outputs = vec![];
+         loop {

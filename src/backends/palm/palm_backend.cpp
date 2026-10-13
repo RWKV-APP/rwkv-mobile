@@ -6,6 +6,9 @@
 #include <cerrno>
 #include <climits>
 #include <cstdlib>
+#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__) && !defined(__OHOS__))
+#include <thread>
+#endif
 
 #if defined(__aarch64__) && defined(__linux__)
 #include <asm/hwcap.h>
@@ -66,6 +69,25 @@ int palm_backend::load_model(std::string model_path, void*) {
 
     auto next = std::make_unique<LLMEngine>();
     EngineConfig config;
+#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__) && !defined(__OHOS__))
+    const unsigned int logical_cpus = std::thread::hardware_concurrency();
+    config.num_threads = static_cast<int>(logical_cpus > 2 ? logical_cpus - 2 : 1);
+#endif
+#if defined(__ANDROID__)
+    // Leave CPU headroom for the caller and UI around Palm's spinning workers.
+    config.num_threads = 4;
+#endif
+    if (const char *value = std::getenv("RWKV_PALM_THREADS")) {
+        errno = 0;
+        char *end = nullptr;
+        const long requested = std::strtol(value, &end, 10);
+        if (errno == 0 && end != value && *end == '\0' && requested > 0 && requested <= 256) {
+            config.num_threads = static_cast<int>(requested);
+        }
+    }
+#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__) && !defined(__OHOS__))
+    LOGI("Palm CPU threads: %d", config.num_threads);
+#endif
     config.package_path = std::move(model_path);
     config.weight_loading = WeightLoadingMode::MMAP;
     if (!next->load(config)) {
@@ -104,6 +126,7 @@ int palm_backend::eval(int id, Tensor1D& logits) {
     if (!engine) return RWKV_ERROR_BACKEND;
     const Tensor hidden = engine->decode_hidden(id);
     const int ret = update_logits(hidden, 1, logits);
+    engine->park_workers();
     if (ret == RWKV_SUCCESS) token_history.push_back(id);
     return ret;
 }
@@ -112,6 +135,7 @@ int palm_backend::eval(std::vector<int> ids, Tensor1D& logits) {
     if (!engine || ids.empty()) return RWKV_ERROR_BACKEND | RWKV_ERROR_INVALID_PARAMETERS;
     const Tensor hidden = engine->prefill_hidden(ids);
     const int ret = update_logits(hidden, static_cast<int>(ids.size()), logits);
+    engine->park_workers();
     if (ret == RWKV_SUCCESS) token_history.insert(token_history.end(), ids.begin(), ids.end());
     return ret;
 }
@@ -133,7 +157,11 @@ int palm_backend::set_state(std::any state) {
 
     engine->reset();
     token_history.clear();
-    if (!restored.empty() && !engine->prefill_hidden(restored).data) return RWKV_ERROR_EVAL;
+    if (!restored.empty()) {
+        const Tensor hidden = engine->prefill_hidden(restored);
+        engine->park_workers();
+        if (!hidden.data) return RWKV_ERROR_EVAL;
+    }
     // ponytail: replay is O(history); replace with native Palm state snapshots if cache restores become measurable.
     token_history = std::move(restored);
     return RWKV_SUCCESS;

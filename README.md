@@ -14,7 +14,7 @@ is [MollySophia/rwkv-mobile](https://github.com/MollySophia/rwkv-mobile).
 
 ## Supported or planned backends:
 
-- [x] WebRWKV (WebGPU): Compatible with most PC graphics cards, as well as macOS Metal. Doesn't work on Qualcomm's proprietary Adreno GPU driver though.
+- [x] WebRWKV (WebGPU): Compatible with most PC graphics cards, macOS Metal, and tested Android Adreno/Mali GPUs. Driver support remains device specific.
 - [x] llama.cpp: Run on Android devices with CPU inference.
 - [x] ncnn: Initial support for rwkv v6/v7 unquantized models (suitable for running tiny models everywhere).
 - [x] Qualcomm Hexagon NPU: Based on Qualcomm's QNN SDK 2.42.0.
@@ -53,6 +53,44 @@ ninja
 ```
 
 For Dimensity 9500/NP9 builds, use `-DENABLE_MTK_NP9_BACKEND=ON`. NP7 and NP9 can be enabled together; the MediaTek runtime archives are packaged as separate `librwkv_mtk_np7.so` and `librwkv_mtk_np9.so` libraries and loaded with `dlopen`. See [MTK_NP9_SUPPORT.md](MTK_NP9_SUPPORT.md) for the current NP9 integration notes.
+
+## Headless engine measurements
+
+Build with `-DBUILD_EXAMPLES=ON`, then run:
+
+```sh
+simple_benchmark model_file backend 128 64 3
+```
+
+This resets recurrent state for one warmup and three measured runs, uses fixed
+token IDs, and reports wall-clock prefill/decode tokens per second. Checksums
+cover finite logits across the entire vocabulary. Sampling and App/UI overhead
+are excluded; these measurements do not establish App performance acceptance.
+For QNN, set `RWKV_QNN_BACKEND_PATH` to the absolute `libQnnHtp.so` path.
+
+Windows/Linux desktop CPU inference with llama.cpp defaults to at most 12
+available compute threads. Palm defaults to the platform logical CPU count
+minus two, with a minimum of one compute thread.
+`RWKV_LLAMACPP_THREADS` and `RWKV_PALM_THREADS` override the respective thread
+counts. GPU offload keeps its existing defaults. Palm uses four threads on
+Android; llama.cpp uses the online CPU count there.
+Choose mobile overrides from repeated measurements on the intended device.
+
+Compare a frozen baseline executable with a candidate using
+`python examples/test_prefill_equivalence.py BASELINE CANDIDATE MODEL BACKEND`.
+The check covers 1, 2, 17 and 128 input tokens and the next decode step.
+
+For optional numerical diagnostics, `RWKV_BENCH_DUMP_LOGITS=PREFIX` writes
+`PREFIX-0.f32`, `PREFIX-1.f32`, and subsequent full-vocabulary float32 outputs
+outside the timed regions.
+
+WebRWKV uses pinned dependency patches for RWKV7 output heads that exceed a
+device's storage-binding limit. It splits the existing FP16 head into row
+bindings and uses 32-token prefill chunks on those devices. Weight files and
+quantization remain unchanged. NF4 decode reads its quantization table directly
+from uniform storage on Adreno and Mali; other GPU vendors keep the shared-table
+path. Fixed 2.9B measurements and full-vocabulary parity checks cover Adreno 750
+and Mali-G1-Ultra; these native checks do not establish App acceptance.
 
 ## TODO:
 - [ ] Better tensor abstraction for different backends
