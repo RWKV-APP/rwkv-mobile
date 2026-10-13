@@ -367,6 +367,10 @@ if (ENABLE_LLAMACPP_BACKEND)
         option(GGML_VULKAN "" ON)
     endif()
 
+    if (ANDROID)
+        # Use ggml's pthread pool: NDK libomp can abort on Android affinity initialization.
+        set(GGML_OPENMP OFF CACHE BOOL "ggml: use OpenMP" FORCE)
+    endif()
     FetchContent_MakeAvailable(llama_cpp)
     if (ANDROID)
         include(cmake/patch_llama_cpp_android_mmap.cmake)
