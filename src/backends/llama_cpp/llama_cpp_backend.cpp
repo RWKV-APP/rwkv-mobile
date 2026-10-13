@@ -3,7 +3,8 @@
 #include <thread>
 #include <algorithm>
 #include <cstring>
-#if defined(__ANDROID__)
+#include <exception>
+#if defined(__ANDROID__) || defined(__OHOS__)
 #include <unistd.h>
 #endif
 
@@ -30,7 +31,7 @@ static int make_logits_tensor_view(float * logits_out, size_t count, Tensor1D &l
 }
 
 void llama_cpp_backend::initialize_supported_batch_sizes() {
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
     supported_batch_sizes = {1};
 #else
     supported_batch_sizes.clear();
@@ -103,12 +104,18 @@ int llama_cpp_backend::load_model(std::string model_path, void * extra) {
     ctx_params.n_ctx = n_ctx_per_seq * (uint32_t) kMaxBatchSlots;
     ctx_params.n_seq_max = kMaxBatchSlots;
     ctx_params.kv_unified = false;
+#if defined(__ANDROID__) || defined(__OHOS__)
+    // A 512-token CPU graph exposes materially more parallelism for the 2.9B
+    // Q4_K_M model while remaining within the Kirin device's memory budget.
+    ctx_params.n_batch = 512;
+    ctx_params.n_ubatch = 512;
+#endif
     ctx = llama_init_from_model(model, ctx_params);
     if (!ctx) {
         return RWKV_ERROR_MODEL | RWKV_ERROR_IO;
     }
 
-#ifdef __ANDROID__
+#if defined(__ANDROID__) || defined(__OHOS__)
     const long online_cpus = sysconf(_SC_NPROCESSORS_ONLN);
     const int n_threads = online_cpus > 0 ? (int) online_cpus : (int) std::thread::hardware_concurrency();
     if (n_threads > 0) {
@@ -141,7 +148,15 @@ int llama_cpp_backend::load_model(std::string model_path, void * extra) {
 
 int llama_cpp_backend::eval(int id, Tensor1D & logits) {
     llama_batch batch = llama_batch_get_one(&id, 1);
-    if (llama_decode(ctx, batch) != 0) {
+    try {
+        if (llama_decode(ctx, batch) != 0) {
+            return RWKV_ERROR_EVAL;
+        }
+    } catch (const std::exception &error) {
+        LOGE("llama.cpp decode failed: %s", error.what());
+        return RWKV_ERROR_EVAL;
+    } catch (...) {
+        LOGE("llama.cpp decode failed with an unknown exception");
         return RWKV_ERROR_EVAL;
     }
 
@@ -165,9 +180,25 @@ int llama_cpp_backend::eval(std::vector<int> ids, Tensor1D & logits) {
 
     if (ids.size() > 1) {
         std::vector<int> prefix(ids.begin(), ids.end() - 1);
-        llama_batch prefix_batch = llama_batch_get_one(prefix.data(), prefix.size());
-        if (llama_decode(ctx, prefix_batch) != 0) {
-            return RWKV_ERROR_EVAL;
+#if defined(__ANDROID__) || defined(__OHOS__)
+        constexpr size_t kPrefillBatchSize = 512;
+#else
+        const size_t kPrefillBatchSize = prefix.size();
+#endif
+        for (size_t offset = 0; offset < prefix.size(); offset += kPrefillBatchSize) {
+            const size_t count = std::min(kPrefillBatchSize, prefix.size() - offset);
+            llama_batch prefix_batch = llama_batch_get_one(prefix.data() + offset, count);
+            try {
+                if (llama_decode(ctx, prefix_batch) != 0) {
+                    return RWKV_ERROR_EVAL;
+                }
+            } catch (const std::exception &error) {
+                LOGE("llama.cpp prefill failed: %s", error.what());
+                return RWKV_ERROR_EVAL;
+            } catch (...) {
+                LOGE("llama.cpp prefill failed with an unknown exception");
+                return RWKV_ERROR_EVAL;
+            }
         }
     }
 

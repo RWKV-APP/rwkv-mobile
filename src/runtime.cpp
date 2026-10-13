@@ -51,6 +51,10 @@
 #include "mlx_rwkv_backend.h"
 #endif
 
+#ifdef ENABLE_NNRT
+#include "nnrt_backend.h"
+#endif
+
 #if defined(ENABLE_VISION)
 #include "multimodal/vision/vision_encoder.h"
 #endif
@@ -228,6 +232,8 @@ std::string backend_enum_to_str(int backend) {
             return "mlx";
         case RWKV_BACKEND_MTK_NP9:
             return "mtk_np9";
+        case RWKV_BACKEND_NNRT:
+            return "nnrt";
         default:
             return "unknown";
     }
@@ -252,6 +258,8 @@ int backend_str_to_enum(std::string backend) {
         return RWKV_BACKEND_MLX;
     } else if (backend == "mtk_np9") {
         return RWKV_BACKEND_MTK_NP9;
+    } else if (backend == "nnrt") {
+        return RWKV_BACKEND_NNRT;
     }
     return -1;
 }
@@ -406,6 +414,14 @@ int Runtime::load_model(std::string model_path, std::string backend_name, std::s
             [](execution_provider *p) { delete (mlx_rwkv_backend*)p; });
 #else
         LOGE("MLX backend is not supported on this platform\n");
+        return ret_model_id;
+#endif
+    } else if (backend_id == RWKV_BACKEND_NNRT) {
+#ifdef ENABLE_NNRT
+        model_instance->backend = std::unique_ptr<execution_provider, std::function<void(execution_provider*)>>(new nnrt_backend,
+            [](execution_provider *p) { delete (nnrt_backend*)p; });
+#else
+        LOGE("NNRT backend is not supported on this platform\n");
         return ret_model_id;
 #endif
     } else {
@@ -641,6 +657,10 @@ int Runtime::get_available_backend_ids(std::vector<int> &backend_ids) {
 
 #ifdef ENABLE_MLX
     backend_ids.push_back(RWKV_BACKEND_MLX);
+#endif
+
+#ifdef ENABLE_NNRT
+    backend_ids.push_back(RWKV_BACKEND_NNRT);
 #endif
 
     return RWKV_SUCCESS;
@@ -3547,6 +3567,19 @@ double Runtime::get_avg_decode_speed(int model_id) {
         return 0.0;
     }
     auto &model = _models.at(model_id);
+    if (model->backend_name == "nnrt") {
+        double runtime_speed = 0.0;
+        {
+            std::lock_guard<std::mutex> lock(model->speed_samples_mutex);
+            runtime_speed = _compute_trimmed_mean_speed_tokens_per_s(
+                model->decode_samples_us,
+                _speed_trim_ratio_total);
+        }
+        if (runtime_speed > 0.0) {
+            _decode_speed = runtime_speed;
+            return runtime_speed;
+        }
+    }
     double speed_from_backend = model->backend->get_decode_speed();
     if (speed_from_backend > 0) {
         return speed_from_backend;

@@ -1,0 +1,6 @@
+# Use CPython 3.12. Package versions are pinned, but wheel hashes and transitive
+# dependencies are platform-specific and intentionally are not claimed as a
+# cross-platform bitwise reproducibility lock.
+numpy==2.5.1
+safetensors==0.5.3
+torch==2.13.0

@@ -26,6 +26,7 @@ option(ENABLE_MTK_NP7_BACKEND "Enable MediaTek NP7 backend" OFF)
 option(ENABLE_MTK_NP9_BACKEND "Enable MediaTek NP9 backend" OFF)
 option(ENABLE_COREML_BACKEND "Enable CoreML backend" OFF)
 option(ENABLE_MLX_BACKEND "Enable MLX backend" OFF)
+option(ENABLE_NNRT_BACKEND "Enable HarmonyOS NNRT backend" OFF)
 
 option(ENABLE_VISION "Enable vision" OFF)
 option(ENABLE_WHISPER "Enable whisper" OFF)
@@ -267,8 +268,8 @@ if (ENABLE_LLAMACPP_BACKEND)
 
     FetchContent_Declare(
         llama_cpp
-        GIT_REPOSITORY https://github.com/ggml-org/llama.cpp
-        GIT_TAG aab68217b7bd8907135dd41fbb5bcb85fca06045
+        URL https://github.com/ggml-org/llama.cpp/archive/aab68217b7bd8907135dd41fbb5bcb85fca06045.tar.gz
+        URL_HASH SHA256=591c497baea3d95b29471050b1f195355e951667e5e60d4088e565d074d3496b
     )
 
     option(LLAMA_STANDALONE "" OFF)
@@ -294,7 +295,9 @@ if (ENABLE_LLAMACPP_BACKEND)
         set(GGML_AVX512_VNNI OFF CACHE BOOL "ggml: enable AVX512-VNNI" FORCE)
         set(GGML_AVX512_BF16 OFF CACHE BOOL "ggml: enable AVX512-BF16" FORCE)
     endif()
-    if ((WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux") AND CMAKE_SIZEOF_VOID_P EQUAL 8 AND ENABLE_LLAMACPP_VULKAN)
+    if ((WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "OHOS")
+            AND CMAKE_SIZEOF_VOID_P EQUAL 8
+            AND ENABLE_LLAMACPP_VULKAN)
         option(GGML_VULKAN "" ON)
     endif()
 
@@ -387,6 +390,16 @@ endif()
 
 if (ENABLE_MLX_BACKEND)
     set(RWKV_MOBILE_SRCS ${RWKV_MOBILE_SRCS} src/backends/mlx/mlx_rwkv_backend.cpp)
+endif()
+
+if (ENABLE_NNRT_BACKEND)
+    if (NOT CMAKE_SYSTEM_NAME STREQUAL "OHOS")
+        message(FATAL_ERROR "NNRT backend is only supported on HarmonyOS builds")
+    endif()
+    set(RWKV_MOBILE_SRCS ${RWKV_MOBILE_SRCS}
+        src/backends/nnrt/nnrt_backend.cpp
+        src/backends/nnrt/safetensors_file.cpp
+    )
 endif()
 
 if (WIN32)
@@ -665,6 +678,41 @@ if (ENABLE_QNN_BACKEND)
     if (WIN32)
         target_link_libraries(rwkv_mobile_internal PRIVATE Shlwapi Shell32)
     endif()
+endif()
+
+if (ENABLE_NNRT_BACKEND)
+    if (CMAKE_OHOS_ARCH_ABI STREQUAL "arm64-v8a" OR OHOS_ARCH STREQUAL "arm64-v8a")
+        set(RWKV_HMOS_LIBRARY_ARCH "aarch64-linux-ohos")
+    elseif(CMAKE_OHOS_ARCH_ABI STREQUAL "armeabi-v7a" OR OHOS_ARCH STREQUAL "armeabi-v7a")
+        set(RWKV_HMOS_LIBRARY_ARCH "arm-linux-ohos")
+    elseif(CMAKE_OHOS_ARCH_ABI STREQUAL "x86_64" OR OHOS_ARCH STREQUAL "x86_64")
+        set(RWKV_HMOS_LIBRARY_ARCH "x86_64-linux-ohos")
+    else()
+        message(FATAL_ERROR "Unsupported HarmonyOS NNRT architecture: ${CMAKE_OHOS_ARCH_ABI}${OHOS_ARCH}")
+    endif()
+    set(RWKV_HMOS_NATIVE_ROOT "${HMOS_SDK_NATIVE}")
+    if (NOT EXISTS "${RWKV_HMOS_NATIVE_ROOT}/sysroot/usr/lib")
+        get_filename_component(RWKV_ACTIVE_NATIVE_ROOT "${CMAKE_SYSROOT}" DIRECTORY)
+        get_filename_component(RWKV_ACTIVE_SDK_FLAVOR_ROOT "${RWKV_ACTIVE_NATIVE_ROOT}" DIRECTORY)
+        get_filename_component(RWKV_DEFAULT_SDK_ROOT "${RWKV_ACTIVE_SDK_FLAVOR_ROOT}" DIRECTORY)
+        set(RWKV_HMOS_NATIVE_ROOT "${RWKV_DEFAULT_SDK_ROOT}/hms/native")
+    endif()
+    if (NOT EXISTS "${RWKV_HMOS_NATIVE_ROOT}/sysroot/usr/lib/${RWKV_HMOS_LIBRARY_ARCH}/libhiai_foundation.so")
+        message(FATAL_ERROR "HarmonyOS HMS native SDK with libhiai_foundation.so was not found")
+    endif()
+    find_library(RWKV_HIAI_FOUNDATION_LIBRARY
+        NAMES hiai_foundation
+        PATHS "${RWKV_HMOS_NATIVE_ROOT}/sysroot/usr/lib/${RWKV_HMOS_LIBRARY_ARCH}"
+        NO_DEFAULT_PATH
+        REQUIRED
+    )
+    target_compile_definitions(rwkv_mobile_internal PUBLIC ENABLE_NNRT)
+    target_include_directories(rwkv_mobile_internal PUBLIC src/backends/nnrt)
+    target_link_libraries(rwkv_mobile_internal PUBLIC
+        libneural_network_runtime.so
+        libneural_network_core.so
+        "${RWKV_HIAI_FOUNDATION_LIBRARY}"
+    )
 endif()
 
 if (ENABLE_MNN_BACKEND)
