@@ -1,0 +1,69 @@
+--- a/src/shaders/subgroup/matmul_vec_nf4.wgsl
++++ b/src/shaders/subgroup/matmul_vec_nf4.wgsl
+@@ -27,7 +27,12 @@
+ const NUM_SUBGROUPS: u32 = BLOCK_SIZE / MIN_SUBGROUP_SIZE;
+ 
+ var<workgroup> sketch: array<vec4<f32>, NUM_SUBGROUPS>;
++#ifdef NF4_UNIFORM_TABLE
++#define NF4_TABLE quant
++#else
++#define NF4_TABLE q
+ var<workgroup> q: array<vec4<f32>, 4u>;
++#endif
+ 
+ // ACTIVATION_DEFINE
+ 
+@@ -58,10 +63,10 @@
+         (v & 0x0000f000u) >> 12u,
+     );
+     return vec4<f32>(
+-        q[i.x >> 2u][i.x & 3u],
+-        q[i.y >> 2u][i.y & 3u],
+-        q[i.z >> 2u][i.z & 3u],
+-        q[i.w >> 2u][i.w & 3u],
++        NF4_TABLE[i.x >> 2u][i.x & 3u],
++        NF4_TABLE[i.y >> 2u][i.y & 3u],
++        NF4_TABLE[i.z >> 2u][i.z & 3u],
++        NF4_TABLE[i.w >> 2u][i.w & 3u],
+     );
+ }
+ 
+@@ -73,10 +78,10 @@
+         (v & 0xf0000000u) >> 28u,
+     );
+     return vec4<f32>(
+-        q[i.x >> 2u][i.x & 3u],
+-        q[i.y >> 2u][i.y & 3u],
+-        q[i.z >> 2u][i.z & 3u],
+-        q[i.w >> 2u][i.w & 3u],
++        NF4_TABLE[i.x >> 2u][i.x & 3u],
++        NF4_TABLE[i.y >> 2u][i.y & 3u],
++        NF4_TABLE[i.z >> 2u][i.z & 3u],
++        NF4_TABLE[i.w >> 2u][i.w & 3u],
+     );
+ }
+ 
+@@ -104,10 +109,12 @@
+     let bb = compute_index(source, batch, token, 0u, 3u);
+     let cb = batch * shape.y * stride + channel * 4u * stride;
+ 
++#ifndef NF4_UNIFORM_TABLE
+     if index == 0u {
+         q = quant;
+     }
+     workgroupBarrier();
++#endif
+ 
+     var local_sum = vec4<f32>(0.0);
+     for (var i = index; i < stride; i += BLOCK_SIZE) {
+--- a/src/tensor/ops.rs
++++ b/src/tensor/ops.rs
+@@ -933,6 +933,8 @@
+             "matmul",
+             Macros::new()
+                 .subgroup(context.min_subgroup_size(), context.max_subgroup_size())
++                // Uniform reads avoid shared-table setup on Adreno and Mali.
++                .bool("NF4_UNIFORM_TABLE", matches!(context.adapter.get_info().vendor, 0x5143 | 0x13b5))
+                 .u32("BLOCK_SIZE", BLOCK_SIZE)
+                 .nf4(Self::NF4_BLOCK_SIZE)
+                 .tensor(&input, Some("IN"))

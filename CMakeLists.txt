@@ -26,6 +26,11 @@ option(ENABLE_MTK_NP7_BACKEND "Enable MediaTek NP7 backend" OFF)
 option(ENABLE_MTK_NP9_BACKEND "Enable MediaTek NP9 backend" OFF)
 option(ENABLE_COREML_BACKEND "Enable CoreML backend" OFF)
 option(ENABLE_MLX_BACKEND "Enable MLX backend" OFF)
+option(ENABLE_PALM_BACKEND "Enable Palm-Infra CPU backend" OFF)
+set(PALM_INFRA_DIR "" CACHE PATH
+    "Optional path to a local Palm-Infra source tree")
+set(PALM_INFRA_GIT_TAG "a03fcf7a46ab334ada5b8b32bad83e03a1306cb2" CACHE STRING
+    "Pinned Palm-Infra source revision")
 
 option(ENABLE_VISION "Enable vision" OFF)
 option(ENABLE_WHISPER "Enable whisper" OFF)
@@ -41,6 +46,18 @@ if (ENABLE_TTS AND NOT ENABLE_MNN_BACKEND)
 endif()
 
 list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
+
+if (WIN32 AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    # LLVM's Windows runtime is not discovered reliably by FindOpenMP.
+    get_filename_component(RWKV_CLANG_BIN "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    find_library(OpenMP_libomp_LIBRARY NAMES libomp
+        HINTS "${RWKV_CLANG_BIN}/../lib" NO_DEFAULT_PATH REQUIRED)
+    set(OpenMP_C_FLAGS "-fopenmp" CACHE STRING "Clang OpenMP flags")
+    set(OpenMP_CXX_FLAGS "-fopenmp" CACHE STRING "Clang OpenMP flags")
+    set(OpenMP_C_LIB_NAMES "libomp" CACHE STRING "Clang OpenMP runtime")
+    set(OpenMP_CXX_LIB_NAMES "libomp" CACHE STRING "Clang OpenMP runtime")
+    find_package(OpenMP REQUIRED)
+endif()
 
 option(ADDRESS_SANITIZER "Enable AddressSanitizer" OFF)
 
@@ -148,6 +165,18 @@ if (ENABLE_WEBRWKV_BACKEND)
         )
         FetchContent_MakeAvailable(Corrosion)
 
+        FetchContent_Declare(web_rwkv
+            URL https://static.crates.io/crates/web-rwkv/web-rwkv-0.10.15.crate
+            URL_HASH SHA256=45d2c853114d4fcae66b5232f89baa5a89a6866a1789239e3cd47614cbe21462
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        )
+        FetchContent_MakeAvailable(web_rwkv)
+        set(SOURCE_DIR "${web_rwkv_SOURCE_DIR}")
+        set(PATCH_FILE "${CMAKE_CURRENT_SOURCE_DIR}/cmake/patches/web_rwkv_head_bindings.patch")
+        include(cmake/apply_dependency_patch.cmake)
+        set(PATCH_FILE "${CMAKE_CURRENT_SOURCE_DIR}/cmake/patches/web_rwkv_nf4_mobile.patch")
+        include(cmake/apply_dependency_patch.cmake)
+
         FetchContent_Declare(
             web_rwkv_ffi
             GIT_REPOSITORY https://github.com/MollySophia/web-rwkv-ffi
@@ -155,8 +184,14 @@ if (ENABLE_WEBRWKV_BACKEND)
         )
         FetchContent_MakeAvailable(web_rwkv_ffi)
 
+        set(SOURCE_DIR "${web_rwkv_ffi_SOURCE_DIR}")
+        set(PATCH_FILE "${CMAKE_CURRENT_SOURCE_DIR}/cmake/patches/web_rwkv_ffi_head_bindings.patch")
+        include(cmake/apply_dependency_patch.cmake)
+
         corrosion_import_crate(MANIFEST_PATH ${web_rwkv_ffi_SOURCE_DIR}/Cargo.toml
             CRATE_TYPES staticlib)
+        corrosion_set_cargo_flags(web_rwkv_ffi
+            "--config=patch.crates-io.web-rwkv.path=\"${web_rwkv_SOURCE_DIR}\"")
     endif()
 
 endif()
@@ -193,6 +228,9 @@ if (ENABLE_MNN_BACKEND)
         mnn
         GIT_REPOSITORY https://github.com/alibaba/MNN
         GIT_TAG 3.3.0
+        PATCH_COMMAND "${CMAKE_COMMAND}"
+            -DMNN_SOURCE_DIR=<SOURCE_DIR>
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch_mnn_clang_runtime.cmake"
     )
 
     if (ANDROID OR (WIN32 AND (CMAKE_SYSTEM_PROCESSOR MATCHES "arm64" OR CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")))
@@ -243,6 +281,55 @@ endif()
 
 if (ENABLE_MTK_NP7_BACKEND OR ENABLE_MTK_NP9_BACKEND)
     set(RWKV_MOBILE_SRCS ${RWKV_MOBILE_SRCS} src/backends/mtk_common/mtk_rwkv_dlopen.cpp)
+endif()
+
+if (ENABLE_PALM_BACKEND)
+    set(MOLLM_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(MOLLM_BUILD_EXAMPLE OFF CACHE BOOL "" FORCE)
+    set(MOLLM_METAL OFF CACHE BOOL "" FORCE)
+    set(MOLLM_CUDA OFF CACHE BOOL "" FORCE)
+    if (PALM_INFRA_DIR)
+        if (NOT EXISTS "${PALM_INFRA_DIR}/CMakeLists.txt")
+            message(FATAL_ERROR "PALM_INFRA_DIR does not contain Palm-Infra: ${PALM_INFRA_DIR}")
+        endif()
+        set(PALM_INFRA_SOURCE_DIR "${PALM_INFRA_DIR}")
+    else()
+        FetchContent_Declare(
+            palm_infra
+            GIT_REPOSITORY https://github.com/RWKV-APP/Palm-Infra.git
+            GIT_TAG ${PALM_INFRA_GIT_TAG}
+            GIT_SHALLOW FALSE
+            PATCH_COMMAND "${CMAKE_COMMAND}"
+                -DPALM_INFRA_SOURCE_DIR=<SOURCE_DIR>
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch_palm_windows_sampler.cmake"
+        )
+        FetchContent_GetProperties(palm_infra)
+        if (NOT palm_infra_POPULATED)
+            FetchContent_Populate(palm_infra)
+        endif()
+        set(PALM_INFRA_SOURCE_DIR "${palm_infra_SOURCE_DIR}")
+    endif()
+    add_subdirectory("${PALM_INFRA_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/palm-infra" EXCLUDE_FROM_ALL)
+    if (APPLE AND (CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64" OR CMAKE_OSX_ARCHITECTURES MATCHES "arm64"))
+        target_compile_options(mollm_lib PRIVATE "-march=armv8.2-a+dotprod+fp16+fp16fml")
+    endif()
+    if (WIN32 AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        execute_process(
+            COMMAND "${CMAKE_CXX_COMPILER}" --print-resource-dir
+            OUTPUT_VARIABLE PALM_CLANG_RESOURCE_DIR
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+        if (CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|ARM64|aarch64")
+            set(PALM_CLANG_BUILTINS "${PALM_CLANG_RESOURCE_DIR}/lib/windows/clang_rt.builtins-aarch64.lib")
+        else()
+            set(PALM_CLANG_BUILTINS "${PALM_CLANG_RESOURCE_DIR}/lib/windows/clang_rt.builtins-x86_64.lib")
+        endif()
+        if (NOT EXISTS "${PALM_CLANG_BUILTINS}")
+            message(FATAL_ERROR "Palm requires Clang builtins: ${PALM_CLANG_BUILTINS}")
+        endif()
+        target_link_libraries(mollm_lib PUBLIC "${PALM_CLANG_BUILTINS}")
+    endif()
+    set(RWKV_MOBILE_SRCS ${RWKV_MOBILE_SRCS} src/backends/palm/palm_backend.cpp)
 endif()
 
 if (ENABLE_VISION)
@@ -298,7 +385,24 @@ if (ENABLE_LLAMACPP_BACKEND)
         option(GGML_VULKAN "" ON)
     endif()
 
+    if (ANDROID)
+        # Use ggml's pthread pool: NDK libomp can abort on Android affinity initialization.
+        set(GGML_OPENMP OFF CACHE BOOL "ggml: use OpenMP" FORCE)
+    endif()
     FetchContent_MakeAvailable(llama_cpp)
+    if (ANDROID)
+        include(cmake/patch_llama_cpp_android_mmap.cmake)
+        rwkv_mobile_patch_llama_cpp_android_mmap("${llama_cpp_SOURCE_DIR}/src/llama-mmap.cpp")
+    endif()
+    if (CMAKE_SYSTEM_NAME STREQUAL "OHOS")
+        include(cmake/patch_llama_cpp_ohos_affinity.cmake)
+        rwkv_mobile_patch_llama_cpp_ohos_affinity(
+            "${llama_cpp_SOURCE_DIR}/ggml/src/ggml-cpu/ggml-cpu.c"
+        )
+        # HarmonyOS' musl headers expose cpu_set_t, CPU_SET, and
+        # sched_setaffinity only under the GNU feature surface.
+        target_compile_definitions(ggml-cpu PRIVATE _GNU_SOURCE)
+    endif()
     target_compile_definitions(llama PUBLIC _DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
     target_compile_definitions(ggml PUBLIC _DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
     target_compile_definitions(ggml-base PUBLIC _DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
@@ -347,10 +451,9 @@ if (ENABLE_WHISPER OR ENABLE_TTS)
     endif()
     FetchContent_Declare(
         Eigen
-        GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
-        GIT_TAG 3.3
-        GIT_SHALLOW TRUE
-        GIT_PROGRESS TRUE
+        URL https://gitlab.com/api/v4/projects/libeigen%2Feigen/repository/archive.tar.gz?sha=5e8edd21863b8321fc6b9c82322e6cc8cfc47c14
+        URL_HASH SHA256=abfa4e28cd4efc62c33d43b1af909bfbb3623e0a83866c7b4e75ba6e700bf4ec
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     )
     # note: To disable eigen tests,
     # you should put this code in a add_subdirectory to avoid to change
@@ -442,8 +545,9 @@ endif()
 if (ENABLE_WEBRWKV_BACKEND)
     FetchContent_Declare(
         bzip2
-        GIT_REPOSITORY https://gitlab.com/bzip2/bzip2
-        GIT_TAG master
+        URL https://gitlab.com/api/v4/projects/bzip2%2Fbzip2/repository/archive.tar.gz?sha=66c46b8c9436613fd81bc5d03f63a61933a4dcc3
+        URL_HASH SHA256=f8d336c718c2a6b5c17682f976ce51534b484a58c1eed84f1df06e519f06c82c
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     )
     option(ENABLE_STATIC_LIB "" ON)
     option(ENABLE_STATIC_LIB_IS_PIC "" ON)
@@ -597,6 +701,15 @@ if (ENABLE_MLX_BACKEND)
     target_link_libraries(rwkv_mobile_internal PUBLIC ${MLX_LIB_PATH} ${FOUNDATION_LIBRARY} ${METAL_FRAMEWORK} ${Accelerate_LIBRARY})
 endif()
 
+if (ENABLE_PALM_BACKEND)
+    target_compile_definitions(rwkv_mobile_internal PUBLIC ENABLE_PALM)
+    target_include_directories(rwkv_mobile_internal PUBLIC
+        src/backends/palm
+        "${PALM_INFRA_SOURCE_DIR}"
+    )
+    target_link_libraries(rwkv_mobile_internal PUBLIC mollm_lib)
+endif()
+
 if (ENABLE_VISION)
     target_include_directories(rwkv_mobile_internal PUBLIC src/multimodal/vision)
     target_compile_definitions(rwkv_mobile_internal PUBLIC ENABLE_VISION)
@@ -647,7 +760,7 @@ if (ENABLE_LLAMACPP_BACKEND)
     find_package(OpenMP)
     if (OpenMP_FOUND)
         if (ANDROID)
-            target_link_libraries(rwkv_mobile_internal PUBLIC -static-openmp)
+            target_link_libraries(rwkv_mobile_internal PUBLIC -fopenmp -static-openmp)
         elseif(NOT IOS)
             target_link_libraries(rwkv_mobile_internal PUBLIC OpenMP::OpenMP_CXX)
         endif()
@@ -864,7 +977,7 @@ else()
         target_compile_definitions(rwkv_mobile PRIVATE _DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
     endif()
     if (ANDROID)
-        target_link_libraries(rwkv_mobile PRIVATE -static-openmp)
+        target_link_libraries(rwkv_mobile PRIVATE -fopenmp -static-openmp)
     endif()
     if (ENABLE_WEBRWKV_BACKEND)
         target_link_libraries(rwkv_mobile PRIVATE ${WEBRWKV_FFI_LIB} ${WEBRWKV_EXTRA_LIBS})

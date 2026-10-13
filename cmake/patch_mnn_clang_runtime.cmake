@@ -1,0 +1,15 @@
+# MNN 3.3.0 clears CMake's CRT selection for clang's GNU frontend, even
+# when it targets the MSVC ABI. Preserve /MD so MNN and the other libraries agree.
+set(source "${MNN_SOURCE_DIR}/CMakeLists.txt")
+file(READ "${source}" content)
+set(before "  if(NOT MSVC)\n    set(CMAKE_MSVC_RUNTIME_LIBRARY \"\")")
+set(after "  if(NOT MSVC AND NOT CMAKE_CXX_SIMULATE_ID STREQUAL \"MSVC\")\n    set(CMAKE_MSVC_RUNTIME_LIBRARY \"\")")
+string(FIND "${content}" "${after}" patched)
+if(patched EQUAL -1)
+    string(FIND "${content}" "${before}" original)
+    if(original EQUAL -1)
+        message(FATAL_ERROR "MNN CRT selection changed; review the Clang patch")
+    endif()
+    string(REPLACE "${before}" "${after}" content "${content}")
+    file(WRITE "${source}" "${content}")
+endif()
