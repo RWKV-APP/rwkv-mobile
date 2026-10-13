@@ -3,6 +3,7 @@
 #include <thread>
 #include <algorithm>
 #include <cstring>
+#include <cstdlib>
 #if defined(__ANDROID__)
 #include <unistd.h>
 #endif
@@ -103,6 +104,19 @@ int llama_cpp_backend::load_model(std::string model_path, void * extra) {
     ctx_params.n_ctx = n_ctx_per_seq * (uint32_t) kMaxBatchSlots;
     ctx_params.n_seq_max = kMaxBatchSlots;
     ctx_params.kv_unified = false;
+#if defined(__APPLE__) && !defined(RWKV_MOBILE_IOS_BUILD)
+    // Private benchmark controls; default runtime behavior is preserved.
+    for (const auto &entry : {std::pair{"RWKV_MOBILE_BENCH_THREADS", &ctx_params.n_threads},
+                              std::pair{"RWKV_MOBILE_BENCH_BATCH_THREADS", &ctx_params.n_threads_batch}}) {
+        if (const char *value = std::getenv(entry.first)) {
+            char *end = nullptr;
+            const long count = std::strtol(value, &end, 10);
+            if (end != value && *end == '\0' && count >= 1 && count <= 64) {
+                *entry.second = static_cast<int32_t>(count);
+            }
+        }
+    }
+#endif
     ctx = llama_init_from_model(model, ctx_params);
     if (!ctx) {
         return RWKV_ERROR_MODEL | RWKV_ERROR_IO;
