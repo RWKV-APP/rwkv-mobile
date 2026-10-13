@@ -16,6 +16,11 @@ parser.add_argument('--lut8', action='store_true', help='Use lut8 palettization'
 parser.add_argument('--lut6', action='store_true', help='Use lut6 palettization')
 parser.add_argument('--lut4', action='store_true', help='Use lut4 palettization')
 parser.add_argument(
+    '--att-output-scale', type=int, choices=[1, 16, 64], default=1,
+    help='Scale attention-output activations before projection and undo afterward; '
+         'preserves the weight recipe, requires numerical and range validation',
+)
+parser.add_argument(
     '--direct-int4-lut6-mix',
     action='store_true',
     help=(
@@ -278,6 +283,7 @@ model_args.USE_CUDA = False
 model_args.fp16 = False
 model_args.USE_EMBEDDING = True
 model_args.SKIP_LMHEAD = False
+model_args.att_output_scale = parser_args.att_output_scale
 # model_args.SKIP_LMHEAD = True
 
 model_args.MODEL_NAME = str(parser_args.model).replace('.pth', '')
@@ -716,6 +722,7 @@ with open(output_dir / 'config.yaml', 'w', encoding='utf-8') as f:
     f.write(f'basename: {combined_base_name}\n')
     f.write(f'num_chunks: {parser_args.chunks}\n')
     f.write(f'state_mode: {parser_args.state_mode}\n')
+    f.write(f'att_output_scale: {parser_args.att_output_scale}\n')
     f.write(f'decode_compute_units: {parser_args.decode_compute_units}\n')
     f.write(f'prefill_compute_units: {parser_args.prefill_compute_units}\n')
     if parser_args.omniquant_parameters is not None:

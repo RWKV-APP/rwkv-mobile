@@ -11,6 +11,12 @@ class Rwkv7SelfAttention(nn.Module):
         self.head_size = head_size
         self.hidden_size = hidden_size
         self.model_args = model_args
+        # Power-of-two activation scaling reduces small-value loss in the
+        # attention output projection without changing its quantized weights.
+        # Keep this opt-in: range and compute-unit behavior are model dependent.
+        self.att_output_scale = getattr(model_args, 'att_output_scale', 1)
+        if self.att_output_scale not in (1, 16, 64):
+            raise ValueError('att_output_scale must be 1, 16, or 64')
 
         if layer_id == 0:
             state_dict[prefix + 'v0'] = state_dict[prefix + 'a0']
@@ -92,16 +98,26 @@ class Rwkv7SelfAttention(nn.Module):
         self.sigmoid_w              = nn.Sigmoid()
 
     def _normalize_heads(self, x):
+        dtype = x.dtype
+        x = x.float()
         norm2 = torch.sum(x * x, dim=-1, keepdim=True)
-        return x * torch.rsqrt(torch.clamp(norm2, min=1e-12))
+        return (x * torch.rsqrt(torch.clamp(norm2, min=1e-12))).to(dtype)
 
     def _head_group_norm(self, x, seq_length, batch_size):
-        x = x.view(seq_length, self.num_heads, self.head_size)
+        # Squaring FP16 outliers can overflow even when the mean variance fits.
+        # Accumulate in FP32 and cast only the normalized result back.
+        dtype = x.dtype
+        x = x.float().view(seq_length, self.num_heads, self.head_size)
         mean = torch.mean(x, dim=-1, keepdim=True)
         x = x - mean
         var = torch.mean(x * x, dim=-1, keepdim=True)
         x = x * torch.rsqrt(var + 64e-5)
-        return x.view(batch_size, seq_length, self.hidden_size)
+        return x.to(dtype).view(batch_size, seq_length, self.hidden_size)
+
+    def _output_projection(self, x):
+        if self.att_output_scale == 1:
+            return self.output(x)
+        return self.output(x * self.att_output_scale) / self.att_output_scale
 
     def forward(self, x, state1, state2, v_first):
         last_x = x
@@ -148,7 +164,11 @@ class Rwkv7SelfAttention(nn.Module):
         v = value.view(seq_length, self.num_heads, self.head_size, 1)
         k = key.view(seq_length, self.num_heads, 1, self.head_size)
         r = receptance.view(seq_length, self.num_heads, self.head_size, 1)
-        if seq_length == 1:
+        if getattr(self, "coreai_wkv", None) is not None and (
+            seq_length > 1 or getattr(self, "coreai_fused_decode", False)
+        ):
+            x, state2_out = self.coreai_wkv(state2, time_decay, a, b, v, k, r)
+        elif seq_length == 1:
             vk = v @ k
             state2_base = state2.clone()
             state2_out = state2_base * time_decay + state2_base @ a @ b + vk
@@ -176,7 +196,7 @@ class Rwkv7SelfAttention(nn.Module):
 
         x = x + ((receptance * key * self.r_k).view(seq_length, self.num_heads, self.head_size).sum(dim=-1, keepdim=True) * value.view(seq_length, self.num_heads, self.head_size)).view(seq_length, self.hidden_size)
         x = self.mul_attention(x, gate)
-        x = self.output(x)
+        x = self._output_projection(x)
 
         return self.add_attention(last_x, x), state1_out, state2_out, v_first
 

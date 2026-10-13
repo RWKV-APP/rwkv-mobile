@@ -21,7 +21,7 @@ is [MollySophia/rwkv-mobile](https://github.com/MollySophia/rwkv-mobile).
 - [x] MLX: Running RWKV on Apple Silicon devices using Apple's MLX framework.
 - [x] MediaTek Neuropilot7: Running RWKV on Dimensity 9300 NPU.
 - [x] MediaTek Neuropilot9: Running RWKV on Dimensity 9500 NPU through Neuron Adapter/uSDK.
-- [x] CoreML: Running RWKV with Apple Neural Engine. Based on Apple's CoreML framework.
+- [x] CoreML: Running RWKV with Apple's CoreML framework on CPU, GPU, or Apple Neural Engine.
 - [x] Palm-Infra: CPU inference from `.mollm` packages, enabled with `-DENABLE_PALM_BACKEND=ON`.
 - [ ] To be continued...
 
@@ -53,6 +53,47 @@ ninja
 ```
 
 For Dimensity 9500/NP9 builds, use `-DENABLE_MTK_NP9_BACKEND=ON`. NP7 and NP9 can be enabled together; the MediaTek runtime archives are packaged as separate `librwkv_mtk_np7.so` and `librwkv_mtk_np9.so` libraries and loaded with `dlopen`. See [MTK_NP9_SUPPORT.md](MTK_NP9_SUPPORT.md) for the current NP9 integration notes.
+
+## Prepare MLX model packages
+
+After MLX conversion and before creating the model ZIP, normalize and check
+per-layer quantization metadata:
+
+```sh
+python3 converter/normalize_mlx_config.py /path/to/model/config.json
+python3 converter/normalize_mlx_config.py /path/to/model/config.json --check
+```
+
+The Swift MLX loader requires each quantized layer's `group_size` explicitly.
+The tool fills omitted values from that section's global `group_size` in both
+`quantization` and `quantization_config`, preserving explicit overrides, bits,
+and tensor files. For RWKV7 it also adds `down_proj` / `up_proj` config aliases
+for Python's `lora.0` / `lora.2` names, matching the Swift loader's tensor-name
+sanitization while retaining the Python keys. Conflicting aliases fail the check.
+It does not re-quantize weights. Package the resulting config
+with the unchanged weights, record the new ZIP digest, and verify loading and
+generation in the consuming App. This metadata check alone is not runtime
+acceptance.
+
+## Core ML loading on macOS 27
+
+Some multifunction ML Programs fail to load with ANE enabled on macOS 27,
+reporting that `functionName` must be nil unless the model is an ML Program.
+For this specific Core ML error, the runtime retries the same model and selected
+function with `cpu-gpu`. It preserves the weights, quantization, and `config.yaml`.
+The warning and successful-load logs identify the effective compute units;
+this compatibility path does not use ANE. Other loading errors retain the normal
+retry behavior, and this workaround does not apply to iOS or earlier macOS versions.
+
+For source exports using `converter/rwkv-coreml/convert_rwkv_to_coreml_int4_import.py`,
+`--state-mode tensor` exposes recurrent state as model inputs and outputs.
+The optional `--att-output-scale 64` multiplies attention-output activations
+before projection and divides the result afterward, retaining the selected
+INT4/LUT6 weight recipe. This reduced CPU/NE numerical divergence for the
+tested 1.5B model on macOS 27. It defaults to `1`: validate finite intermediate
+ranges, fixed-token recurrence, prefill, and compute-unit performance for each
+model before enabling it. Re-exporting is not a byte-identical repair of an
+existing quantized package, and these options do not update downloaded models.
 
 ## TODO:
 - [ ] Better tensor abstraction for different backends

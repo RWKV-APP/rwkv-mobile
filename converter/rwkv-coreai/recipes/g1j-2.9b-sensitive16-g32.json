@@ -1,0 +1,24 @@
+{
+  "format_version": 1,
+  "source_sha256": "966f3420f833532aae3fb1fd6326533b08d43d23b7b03eaa2f0694a30b64a239",
+  "group_size": 32,
+  "protected_modules": [
+    "blocks.31.ffn.key",
+    "blocks.31.ffn.value",
+    "blocks.30.ffn.value",
+    "blocks.29.ffn.key",
+    "blocks.30.ffn.key",
+    "blocks.28.ffn.key",
+    "blocks.27.ffn.key",
+    "blocks.26.ffn.key",
+    "blocks.25.ffn.key",
+    "blocks.24.ffn.key",
+    "blocks.23.ffn.key",
+    "blocks.28.ffn.value",
+    "blocks.22.ffn.key",
+    "blocks.21.ffn.key",
+    "blocks.29.ffn.value",
+    "blocks.20.ffn.key"
+  ],
+  "selection": "Smallest calibration KL among activation-ranked protection counts 8,16,24. Holdout not used for selection."
+}

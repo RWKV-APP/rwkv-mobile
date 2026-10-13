@@ -1,0 +1,16 @@
+{
+  "format_version": 1,
+  "source_sha256": "c43176881caf85fe22ad654ab02e7519260d560f3d20420ab590adb0c823860f",
+  "group_size": 32,
+  "protected_modules": [
+    "blocks.23.ffn.value",
+    "blocks.23.ffn.key",
+    "blocks.11.ffn.value",
+    "blocks.1.ffn.key",
+    "blocks.0.ffn.key",
+    "blocks.16.ffn.key",
+    "blocks.5.ffn.value",
+    "blocks.22.ffn.value"
+  ],
+  "selection": "individual calibration KL improvement, smallest tested protected set halving mean calibration KL (otherwise 12)"
+}

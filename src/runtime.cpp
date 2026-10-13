@@ -51,6 +51,10 @@
 #include "mlx_rwkv_backend.h"
 #endif
 
+#ifdef ENABLE_COREAI
+#include "coreai_rwkv_backend.h"
+#endif
+
 #ifdef ENABLE_PALM
 #include "palm_backend.h"
 #endif
@@ -274,6 +278,8 @@ std::string backend_enum_to_str(int backend) {
             return "mtk_np9";
         case RWKV_BACKEND_PALM:
             return "palm";
+        case RWKV_BACKEND_COREAI:
+            return "coreai";
         default:
             return "unknown";
     }
@@ -300,6 +306,8 @@ int backend_str_to_enum(std::string backend) {
         return RWKV_BACKEND_MTK_NP9;
     } else if (backend == "palm") {
         return RWKV_BACKEND_PALM;
+    } else if (backend == "coreai") {
+        return RWKV_BACKEND_COREAI;
     }
     return -1;
 }
@@ -454,6 +462,14 @@ int Runtime::load_model(std::string model_path, std::string backend_name, std::s
             [](execution_provider *p) { delete (mlx_rwkv_backend*)p; });
 #else
         LOGE("MLX backend is not supported on this platform\n");
+        return ret_model_id;
+#endif
+    } else if (backend_id == RWKV_BACKEND_COREAI) {
+#ifdef ENABLE_COREAI
+        model_instance->backend = std::unique_ptr<execution_provider, std::function<void(execution_provider*)>>(new coreai_rwkv_backend,
+            [](execution_provider *p) { delete static_cast<coreai_rwkv_backend*>(p); });
+#else
+        LOGE("Core AI backend is not enabled in this build\n");
         return ret_model_id;
 #endif
     } else if (backend_id == RWKV_BACKEND_PALM) {
@@ -709,6 +725,10 @@ int Runtime::get_available_backend_ids(std::vector<int> &backend_ids) {
 
 #ifdef ENABLE_MLX
     backend_ids.push_back(RWKV_BACKEND_MLX);
+#endif
+
+#ifdef ENABLE_COREAI
+    if (coreai_rwkv_backend::is_supported()) backend_ids.push_back(RWKV_BACKEND_COREAI);
 #endif
 
 #ifdef ENABLE_PALM
@@ -1408,8 +1428,10 @@ int Runtime::chat(int model_id, std::vector<std::string> inputs,
     auto node = model->backend->match_and_load_state(text_ids, tokens_to_prefill);
     LOGI("matched state cache for prefix: \"%s\"", escape_special_chars(model->tokenizer->decode(node->ids)).c_str());
 
+    // A fully cached prompt still starts a new generation. Do not retain the
+    // previous request's prefill or decode samples when no prefill is needed.
+    reset_inference_speed_stats(model_id);
     if (tokens_to_prefill.size() > 0) {
-        reset_inference_speed_stats(model_id);
         _prefill_progress_start(model_id, tokens_to_prefill.size());
         auto text_to_prefill = model->tokenizer->decode(tokens_to_prefill);
         LOGI("new text to prefill: \"%s\"", escape_special_chars(text_to_prefill).c_str());

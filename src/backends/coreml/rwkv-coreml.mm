@@ -9,6 +9,7 @@
 #import "rwkv_coreml_singlechunk_impl.h"
 
 #import <CoreML/CoreML.h>
+#import <TargetConditionals.h>
 
 #include <stdlib.h>
 #include <cstdarg>
@@ -242,6 +243,23 @@ static int env_int_or_default(const char *name, int default_value, int min_value
     return (int)parsed;
 }
 
+static bool should_retry_coreml_on_gpu(MLModelConfiguration *configuration, NSError *error) {
+#if TARGET_OS_OSX
+    // macOS 27 can reject valid multifunction ML Programs when ANE is enabled.
+    // Keep the selected function and original weights; only change the devices.
+    return NSProcessInfo.processInfo.operatingSystemVersion.majorVersion == 27
+        && (configuration.computeUnits == MLComputeUnitsCPUAndNeuralEngine
+            || configuration.computeUnits == MLComputeUnitsAll)
+        && configuration.functionName.length > 0
+        && [error.domain isEqualToString:MLModelErrorDomain]
+        && error.code == 0
+        && [error.localizedDescription isEqualToString:
+            @"`MLModelConfiguration`'s `.functionName` property must be `nil` unless the model type is ML Program."];
+#else
+    return false;
+#endif
+}
+
 static MLModel * load_coreml_model_with_retry(
     NSURL *url_model,
     MLModelConfiguration *configuration,
@@ -252,30 +270,37 @@ static MLModel * load_coreml_model_with_retry(
 ) {
     const int max_attempts = env_int_or_default("RWKV_COREML_LOAD_RETRY_ATTEMPTS", 3, 1, 10);
     const int retry_delay_ms = env_int_or_default("RWKV_COREML_LOAD_RETRY_DELAY_MS", 500, 0, 10000);
+    MLModelConfiguration *effective_configuration = [configuration copy];
 
     for (int attempt = 1; attempt <= max_attempts; ++attempt) {
         __strong MLModel *model = nil;
         __strong NSError *error = nil;
         auto start = std::chrono::steady_clock::now();
         @autoreleasepool {
-            model = [MLModel modelWithContentsOfURL:url_model configuration:configuration error:&error];
+            model = [MLModel modelWithContentsOfURL:url_model configuration:effective_configuration error:&error];
         }
         auto end = std::chrono::steady_clock::now();
         double ms = std::chrono::duration<double, std::milli>(end - start).count();
 
         if (error == nil && model != nil) {
-            if (attempt == 1) {
-                COREML_LOGI(@"Loaded chunk %d/%d (%@) %@: %.2f ms",
-                      chunk_idx + 1, num_chunks, model_name, function_name, ms);
-            } else {
-                COREML_LOGI(@"Loaded chunk %d/%d (%@) %@: %.2f ms (attempt %d/%d)",
-                      chunk_idx + 1, num_chunks, model_name, function_name, ms, attempt, max_attempts);
-            }
+            COREML_LOGI(@"Loaded chunk %d/%d (%@) %@: %.2f ms (compute_units=%@, attempt %d/%d)",
+                  chunk_idx + 1, num_chunks, model_name, function_name, ms,
+                  compute_units_name(effective_configuration.computeUnits), attempt, max_attempts);
             return model;
         }
 
-        COREML_LOGE(@"Error loading %@ model %@ attempt %d/%d: %@ (%.2f ms)",
-              function_name, model_name, attempt, max_attempts, error, ms);
+        if (should_retry_coreml_on_gpu(effective_configuration, error)) {
+            COREML_LOGW(@"macOS 27 CoreML ANE load failed for %@ model %@ with compute_units=%@: %@ (%.2f ms). Retrying the same function and weights with cpu-gpu; ANE will not be used for this function.",
+                  function_name, model_name, compute_units_name(effective_configuration.computeUnits), error, ms);
+            effective_configuration.computeUnits = MLComputeUnitsCPUAndGPU;
+            // The GPU configuration gets its own bounded retry budget, even when
+            // RWKV_COREML_LOAD_RETRY_ATTEMPTS=1. It cannot trigger this fallback again.
+            attempt = 0;
+            continue;
+        }
+
+        COREML_LOGE(@"Error loading %@ model %@ with compute_units=%@ attempt %d/%d: %@ (%.2f ms)",
+              function_name, model_name, compute_units_name(effective_configuration.computeUnits), attempt, max_attempts, error, ms);
         model = nil;
         error = nil;
 

@@ -26,6 +26,7 @@ option(ENABLE_MTK_NP7_BACKEND "Enable MediaTek NP7 backend" OFF)
 option(ENABLE_MTK_NP9_BACKEND "Enable MediaTek NP9 backend" OFF)
 option(ENABLE_COREML_BACKEND "Enable CoreML backend" OFF)
 option(ENABLE_MLX_BACKEND "Enable MLX backend" OFF)
+option(ENABLE_COREAI_BACKEND "Enable experimental macOS 27 Core AI backend (Xcode 27 required)" OFF)
 option(ENABLE_PALM_BACKEND "Enable Palm-Infra CPU backend" OFF)
 set(PALM_INFRA_DIR "" CACHE PATH
     "Optional path to a local Palm-Infra source tree")
@@ -467,6 +468,17 @@ if (ENABLE_COREML_BACKEND)
     set(RWKV_MOBILE_SRCS ${RWKV_MOBILE_SRCS} src/backends/coreml/coreml_rwkv_backend.cpp)
 endif()
 
+if (ENABLE_COREAI_BACKEND)
+    if (NOT APPLE OR IOS)
+        message(FATAL_ERROR "The experimental Core AI backend currently supports macOS only")
+    endif()
+    if (NOT CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64" OR
+        (CMAKE_OSX_ARCHITECTURES AND NOT CMAKE_OSX_ARCHITECTURES STREQUAL "arm64"))
+        message(FATAL_ERROR "The experimental Core AI backend requires an arm64-only build")
+    endif()
+    set(RWKV_MOBILE_SRCS ${RWKV_MOBILE_SRCS} src/backends/coreai/coreai_rwkv_backend.cpp)
+endif()
+
 if (ENABLE_MLX_BACKEND)
     set(RWKV_MOBILE_SRCS ${RWKV_MOBILE_SRCS} src/backends/mlx/mlx_rwkv_backend.cpp)
 endif()
@@ -607,6 +619,27 @@ if (ENABLE_COREML_BACKEND)
 
     # add_executable(test_coreml src/backends/coreml/test_coreml.cpp)
     # target_link_libraries(test_coreml PUBLIC rwkv_coreml)
+endif()
+
+if (ENABLE_COREAI_BACKEND)
+    find_program(COREAI_XCRUN xcrun REQUIRED)
+    set(COREAI_SWIFT_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/backends/coreai/RWKVCoreAI.swift")
+    set(COREAI_SWIFT_LIBRARY "${CMAKE_CURRENT_BINARY_DIR}/libRWKVCoreAI.a")
+    add_custom_command(OUTPUT "${COREAI_SWIFT_LIBRARY}"
+        COMMAND "${COREAI_XCRUN}" swiftc -parse-as-library -emit-library -static
+            -module-name RWKVCoreAI -target arm64-apple-macos14.0 -O
+            "${COREAI_SWIFT_SOURCE}" -o "${COREAI_SWIFT_LIBRARY}"
+        DEPENDS "${COREAI_SWIFT_SOURCE}" VERBATIM)
+    add_custom_target(rwkv_coreai_swift DEPENDS "${COREAI_SWIFT_LIBRARY}")
+    add_dependencies(rwkv_mobile_internal rwkv_coreai_swift)
+    target_compile_definitions(rwkv_mobile_internal PUBLIC ENABLE_COREAI)
+    target_include_directories(rwkv_mobile_internal PUBLIC src/backends/coreai)
+    execute_process(COMMAND "${COREAI_XCRUN}" --find swiftc
+        OUTPUT_VARIABLE COREAI_SWIFTC OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+    get_filename_component(COREAI_SWIFT_BIN "${COREAI_SWIFTC}" DIRECTORY)
+    target_link_directories(rwkv_mobile_internal PUBLIC "${COREAI_SWIFT_BIN}/../lib/swift/macosx")
+    target_link_libraries(rwkv_mobile_internal PUBLIC "${COREAI_SWIFT_LIBRARY}" "-framework Foundation")
+    target_link_options(rwkv_mobile_internal PUBLIC "SHELL:-weak_framework CoreAI")
 endif()
 
 if (ENABLE_MLX_BACKEND)
@@ -785,7 +818,11 @@ if (ENABLE_MTK_NP7_BACKEND)
 
     add_library(rwkv_mtk_np7_shared SHARED src/backends/mtk_common/mtk_shared_anchor.cpp)
     set_target_properties(rwkv_mtk_np7_shared PROPERTIES OUTPUT_NAME "rwkv_mtk_np7")
-    target_link_options(rwkv_mtk_np7_shared PRIVATE "-Wl,-Bsymbolic")
+    target_link_options(rwkv_mtk_np7_shared PRIVATE
+        "-Wl,-Bsymbolic"
+        "-Wl,-z,max-page-size=16384"
+        "-Wl,-z,common-page-size=16384"
+    )
     target_link_libraries(rwkv_mtk_np7_shared PRIVATE
         "$<LINK_LIBRARY:WHOLE_ARCHIVE,rwkv_mtk_np7_archive>"
         log
@@ -814,7 +851,11 @@ if (ENABLE_MTK_NP9_BACKEND)
 
     add_library(rwkv_mtk_np9_shared SHARED src/backends/mtk_common/mtk_shared_anchor.cpp)
     set_target_properties(rwkv_mtk_np9_shared PROPERTIES OUTPUT_NAME "rwkv_mtk_np9")
-    target_link_options(rwkv_mtk_np9_shared PRIVATE "-Wl,-Bsymbolic")
+    target_link_options(rwkv_mtk_np9_shared PRIVATE
+        "-Wl,-Bsymbolic"
+        "-Wl,-z,max-page-size=16384"
+        "-Wl,-z,common-page-size=16384"
+    )
     target_link_libraries(rwkv_mtk_np9_shared PRIVATE
         "$<LINK_LIBRARY:WHOLE_ARCHIVE,rwkv_mtk_np9_archive>"
         log
