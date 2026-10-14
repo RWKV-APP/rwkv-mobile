@@ -68,12 +68,14 @@ cover finite logits across the entire vocabulary. Sampling and App/UI overhead
 are excluded; these measurements do not establish App performance acceptance.
 For QNN, set `RWKV_QNN_BACKEND_PATH` to the absolute `libQnnHtp.so` path.
 
-Windows/Linux desktop CPU inference with llama.cpp defaults to at most 12
-available compute threads. Palm defaults to the platform logical CPU count
+Windows/Linux x64 CPU inference with llama.cpp defaults to half the logical
+CPU count (rounded down), with a minimum of four compute threads. Desktop
+ARM64 retains its cap of 12 available compute threads. Palm defaults to the platform logical CPU count
 minus two, with a minimum of one compute thread.
 `RWKV_LLAMACPP_THREADS` and `RWKV_PALM_THREADS` override the respective thread
 counts. GPU offload keeps its existing defaults. Palm uses four threads on
 Android; llama.cpp uses the online CPU count there.
+Android does not dynamically select or bind a primary-core group.
 Choose mobile overrides from repeated measurements on the intended device.
 
 Compare a frozen baseline executable with a candidate using

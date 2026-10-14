@@ -14,6 +14,7 @@
 
 #include "backend.h"
 #include "llama_cpp_backend.h"
+#include "cpu_thread_policy.h"
 #include "c_api.h"
 #include "llama.h"
 #include "llama-model.h"
@@ -167,7 +168,11 @@ int llama_cpp_backend::load_model(std::string model_path, void * extra) {
 #if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__) && !defined(__OHOS__))
     if (model_params.n_gpu_layers == 0) {
         const unsigned int available = std::max(1u, std::thread::hardware_concurrency());
+#if defined(__x86_64__) || defined(_M_X64)
+        ctx_params.n_threads = ctx_params.n_threads_batch = desktop_llama_cpu_threads(available);
+#else
         ctx_params.n_threads = ctx_params.n_threads_batch = static_cast<int>(std::min(12u, available));
+#endif
     }
 #endif
     if (const char *value = std::getenv("RWKV_LLAMACPP_THREADS")) {
@@ -192,6 +197,11 @@ int llama_cpp_backend::load_model(std::string model_path, void * extra) {
     }
 #endif
     ctx = llama_init_from_model(model, ctx_params);
+#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__) && !defined(__OHOS__))
+    if (model_params.n_gpu_layers == 0) {
+        LOGI("llama.cpp CPU threads: %d", ctx_params.n_threads);
+    }
+#endif
     if (!ctx) {
         return RWKV_ERROR_MODEL | RWKV_ERROR_IO;
     }
