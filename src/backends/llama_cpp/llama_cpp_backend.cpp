@@ -5,6 +5,9 @@
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 #if defined(__ANDROID__) || defined(__OHOS__)
 #include <unistd.h>
 #endif
@@ -14,6 +17,7 @@
 
 #include "backend.h"
 #include "llama_cpp_backend.h"
+#include "cpu_thread_policy.h"
 #include "c_api.h"
 #include "llama.h"
 #include "llama-model.h"
@@ -164,6 +168,13 @@ int llama_cpp_backend::load_model(std::string model_path, void * extra) {
     ctx_params.n_ctx = n_ctx_per_seq * (uint32_t) kMaxBatchSlots;
     ctx_params.n_seq_max = kMaxBatchSlots;
     ctx_params.kv_unified = false;
+#if defined(__APPLE__) && TARGET_OS_OSX
+    if (model_params.n_gpu_layers == 0) {
+        ctx_params.n_threads = ctx_params.n_threads_batch =
+            macos_llama_cpu_threads(std::thread::hardware_concurrency());
+        LOGI("llama.cpp CPU threads: %d", ctx_params.n_threads);
+    }
+#endif
 #if defined(__ANDROID__) || defined(__OHOS__)
     if (const char * value = std::getenv("RWKV_LLAMACPP_UBATCH")) {
         errno = 0;

@@ -25,6 +25,12 @@ is [MollySophia/rwkv-mobile](https://github.com/MollySophia/rwkv-mobile).
 - [x] Palm-Infra: CPU inference from `.mollm` packages, enabled with `-DENABLE_PALM_BACKEND=ON`.
 - [ ] To be continued...
 
+## CPU thread defaults
+
+CPU-only llama.cpp on macOS uses eight compute threads, bounded by the reported
+logical CPU count. GPU offload and iOS keep their existing defaults. Android
+keeps its existing scheduling; no dynamic primary-core selection is shipped.
+
 ## How to build:
 
 - Install [rust](https://www.rust-lang.org/tools/install) and [cargo](https://doc.rust-lang.org/cargo/getting-started/installation.html) (for building the web-rwkv backend)
