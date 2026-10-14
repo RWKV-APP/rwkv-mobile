@@ -6,9 +6,6 @@
 #include <cerrno>
 #include <climits>
 #include <cstdlib>
-#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__) && !defined(__OHOS__))
-#include <thread>
-#endif
 
 #if defined(__aarch64__) && defined(__linux__)
 #include <asm/hwcap.h>
@@ -69,10 +66,6 @@ int palm_backend::load_model(std::string model_path, void*) {
 
     auto next = std::make_unique<LLMEngine>();
     EngineConfig config;
-#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__) && !defined(__OHOS__))
-    const unsigned int logical_cpus = std::thread::hardware_concurrency();
-    config.num_threads = static_cast<int>(logical_cpus > 2 ? logical_cpus - 2 : 1);
-#endif
 #if defined(__ANDROID__)
     // Leave CPU headroom for the caller and UI around Palm's spinning workers.
     config.num_threads = 4;
