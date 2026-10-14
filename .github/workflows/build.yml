@@ -158,8 +158,9 @@ jobs:
         git -C mlx-swift-examples remote add origin https://github.com/mollysophia/mlx-swift-examples.git
         git -C mlx-swift-examples fetch --depth 1 origin "$MLX_SWIFT_EXAMPLES_COMMIT"
         git -C mlx-swift-examples checkout --detach FETCH_HEAD
+        git -C mlx-swift-examples apply "$GITHUB_WORKSPACE/cmake/mlx-compile-reuse.patch"
         cd mlx-swift-examples
-        xcodebuild -project mlx-swift-examples.xcodeproj -scheme MLXModelFFI -configuration Release -derivedDataPath build -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO
+        xcodebuild -project mlx-swift-examples.xcodeproj -scheme MLXModelFFI -configuration Release -derivedDataPath build -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO OTHER_SWIFT_FLAGS="\$(inherited) -file-prefix-map $GITHUB_WORKSPACE=. -debug-prefix-map $GITHUB_WORKSPACE=." OTHER_CFLAGS="\$(inherited) -ffile-prefix-map=$GITHUB_WORKSPACE=." OTHER_CPLUSPLUSFLAGS="\$(inherited) -ffile-prefix-map=$GITHUB_WORKSPACE=."
         cp build/Build/Products/Release-iphoneos/libMLXModelFFI.a ../src/backends/mlx/prebuilt/ios-arm64/libMLXModelFFI.a
         cp build/Build/Products/Release-iphoneos/mlx-swift_Cmlx.bundle/default.metallib ../src/backends/mlx/prebuilt/ios-arm64/default.metallib
         mlx_archive="$GITHUB_WORKSPACE/src/backends/mlx/prebuilt/ios-arm64/libMLXModelFFI.a"
@@ -256,15 +257,18 @@ jobs:
         git -C mlx-swift-examples remote add origin https://github.com/mollysophia/mlx-swift-examples.git
         git -C mlx-swift-examples fetch --depth 1 origin "$MLX_SWIFT_EXAMPLES_COMMIT"
         git -C mlx-swift-examples checkout --detach FETCH_HEAD
+        git -C mlx-swift-examples apply "$GITHUB_WORKSPACE/cmake/mlx-compile-reuse.patch"
         cd mlx-swift-examples
-        xcodebuild -project mlx-swift-examples.xcodeproj -scheme MLXModelFFI -configuration Release -derivedDataPath build -destination 'platform=OS X'
+        xcodebuild -project mlx-swift-examples.xcodeproj -scheme MLXModelFFI -configuration Release -derivedDataPath build -destination 'platform=OS X' OTHER_SWIFT_FLAGS="\$(inherited) -file-prefix-map $GITHUB_WORKSPACE=. -debug-prefix-map $GITHUB_WORKSPACE=." OTHER_CFLAGS="\$(inherited) -ffile-prefix-map=$GITHUB_WORKSPACE=." OTHER_CPLUSPLUSFLAGS="\$(inherited) -ffile-prefix-map=$GITHUB_WORKSPACE=."
         cp build/Build/Products/Release/libMLXModelFFI.a ../src/backends/mlx/prebuilt/macos-arm64/libMLXModelFFI.a
         cd ..
         rm -rf build-arm64 # build-arm64-debug
         mkdir build-arm64 && cd build-arm64
         cmake .. -DENABLE_NCNN_BACKEND=ON -DENABLE_WEBRWKV_BACKEND=ON -DENABLE_MNN_BACKEND=ON -DENABLE_LLAMACPP_BACKEND=ON -DENABLE_MLX_BACKEND=ON -DENABLE_PALM_BACKEND=ON \
-          -DENABLE_TTS=ON -DENABLE_VISION=ON -DENABLE_WHISPER=ON -DENABLE_COREML_BACKEND=ON -DBUILD_EXAMPLES=OFF -DENABLE_SERVER=OFF -DCMAKE_BUILD_TYPE=Release \
-          -DRWKV_MOBILE_ENABLE_DEBUG_SYMBOLS=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+          -DENABLE_TTS=ON -DENABLE_VISION=ON -DENABLE_WHISPER=ON -DENABLE_COREML_BACKEND=ON -DBUILD_EXAMPLES=OFF -DENABLE_SERVER=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
+          -DRWKV_MOBILE_ENABLE_DEBUG_SYMBOLS=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+          -DCMAKE_C_FLAGS="-ffile-prefix-map=$GITHUB_WORKSPACE=." -DCMAKE_CXX_FLAGS="-ffile-prefix-map=$GITHUB_WORKSPACE=." \
+          -DCMAKE_OBJC_FLAGS="-ffile-prefix-map=$GITHUB_WORKSPACE=." -DCMAKE_OBJCXX_FLAGS="-ffile-prefix-map=$GITHUB_WORKSPACE=."
         cmake --build . -j 8
         mkdir -p ../symbols/macos-aarch64
         dsymutil librwkv_mobile.dylib -o ../symbols/macos-aarch64/librwkv_mobile.dylib.dSYM
