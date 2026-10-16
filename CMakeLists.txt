@@ -43,6 +43,18 @@ endif()
 
 list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
 
+if (WIN32 AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    # LLVM's Windows runtime is not discovered reliably by FindOpenMP.
+    get_filename_component(RWKV_CLANG_BIN "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    find_library(OpenMP_libomp_LIBRARY NAMES libomp
+        HINTS "${RWKV_CLANG_BIN}/../lib" NO_DEFAULT_PATH REQUIRED)
+    set(OpenMP_C_FLAGS "-fopenmp" CACHE STRING "Clang OpenMP flags")
+    set(OpenMP_CXX_FLAGS "-fopenmp" CACHE STRING "Clang OpenMP flags")
+    set(OpenMP_C_LIB_NAMES "libomp" CACHE STRING "Clang OpenMP runtime")
+    set(OpenMP_CXX_LIB_NAMES "libomp" CACHE STRING "Clang OpenMP runtime")
+    find_package(OpenMP REQUIRED)
+endif()
+
 option(ADDRESS_SANITIZER "Enable AddressSanitizer" OFF)
 
 if (RWKV_MOBILE_ENABLE_DEBUG_SYMBOLS)
