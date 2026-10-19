@@ -85,8 +85,8 @@ struct ModelInstance {
 
     // Generation status
     std::string prompt;
-    bool is_generating = false;
-    bool stop_signal = false;
+    std::atomic<bool> is_generating{false};
+    std::atomic<bool> stop_signal{false};
 
     struct SpeedSample {
         int tokens = 0;
@@ -107,6 +107,8 @@ struct ModelInstance {
 #if defined(ENABLE_VISION) || defined(ENABLE_WHISPER)
     std::unique_ptr<MultimodalEncoder> multimodal_encoder;
 #endif
+    // Polling and generation share these buffers; backend execution never holds this lock.
+    mutable std::mutex response_buffer_mutex;
 };
 
 class Runtime {
@@ -159,6 +161,7 @@ public:
     void unload_initial_state(int model_id, std::string state_path);
 
     std::string get_response_buffer_content(int model_id);
+    std::string get_response_buffer_content(int model_id, bool *eos_found);
     const std::vector<int32_t> get_response_buffer_ids(int model_id);
     int get_response_buffer_tokens_count(int model_id);
     std::vector<int> get_response_buffer_tokens_count_batch(int model_id);
@@ -169,6 +172,7 @@ public:
     int calculate_tokens_count_from_messages(int model_id, std::vector<std::string> inputs, std::vector<std::string> roles_map = {});
 
     std::vector<std::string> get_response_buffer_content_batch(int model_id);
+    std::vector<std::string> get_response_buffer_content_batch(int model_id, std::vector<bool> *eos_founds);
     std::vector<std::vector<int32_t>> get_response_buffer_ids_batch(int model_id);
     void clear_response_buffer_batch(int model_id);
     std::vector<bool> get_response_buffer_eos_found_batch(int model_id);

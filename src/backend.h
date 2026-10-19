@@ -21,6 +21,8 @@
 
 namespace rwkvmobile {
 
+struct DeviceSampleParameters;
+
 class state_node {
 public:
     std::any state;
@@ -71,6 +73,11 @@ public:
         return eval_batch(std::move(ids_batch), logits);
     };
     virtual int eval_with_embeddings(const float *embeddings, int n_tokens, Tensor1D & logits) { (void)embeddings; (void)n_tokens; logits = {}; return RWKV_ERROR_UNSUPPORTED; };
+    virtual int device_greedy_step(int &token) { (void)token; return RWKV_ERROR_UNSUPPORTED; }
+    virtual int device_greedy_finish(bool rollback, Tensor1D &logits) { (void)rollback; (void)logits; return RWKV_ERROR_UNSUPPORTED; }
+    // A successful submit advances state; finish must precede the next eval or checkpoint.
+    virtual int eval_deferred(int id) { (void)id; return RWKV_ERROR_UNSUPPORTED; }
+    virtual int finish_deferred(Tensor1D &logits) { (void)logits; return RWKV_ERROR_UNSUPPORTED; }
     virtual int get_state(std::any &state) { return 0; }
     virtual int set_state(std::any state) { return 0; }
     virtual int free_state(std::any state) { return 0; }
@@ -107,6 +114,11 @@ public:
     int get_version() { return version; }
 
     virtual bool embedding_input_force_no_ln0() { return false; }
+
+    // CPU sampling must verify the returned proposal before accepting the advanced state.
+    virtual int device_sample_proposal(const DeviceSampleParameters &parameters, int &token, Tensor1D &prior_logits) {
+        (void)parameters; (void)token; (void)prior_logits; return RWKV_ERROR_UNSUPPORTED;
+    }
 
     int n_layers;
     int num_heads;

@@ -15,7 +15,7 @@ permissions:
   contents: read
 
 env:
-  MLX_SWIFT_EXAMPLES_COMMIT: 34b276b9c774a8d6465e009382dae12f4e97b849
+  MLX_SWIFT_EXAMPLES_COMMIT: 2b40a7df9f189ceccf08086e0d0a068a97a83fa9
 
 jobs:
   setup:
@@ -103,10 +103,21 @@ jobs:
       SYMBOLS_PACKAGENAME: librwkv_mobile-${{ needs.setup.outputs.VERSION }}-windows-arm64-symbols
     steps:
     - uses: actions/checkout@v4
+    - name: setup-msvc
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        if ((Get-PSDrive C).Free -lt 12GB) { throw "Windows ARM64 validation requires 12 GiB of free build space" }
+        $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+        $visualStudio = & $vswhere -latest -property installationPath
+        $vcvarsall = Join-Path $visualStudio 'VC\Auxiliary\Build\vcvarsall.bat'
+        if (!$visualStudio -or !(Test-Path -LiteralPath $vcvarsall)) { throw "Visual Studio ARM64 build environment not found" }
+        "RWKV_VCVARSALL=$vcvarsall" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
     - name: build
       shell: cmd
       run: |
-        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" arm64
+        call "%RWKV_VCVARSALL%" arm64
+        if errorlevel 1 exit /b 1
         cmake -S . -B build -G "Ninja Multi-Config" -D CMAKE_TOOLCHAIN_FILE=cmake\arm64-windows-llvm.cmake ^
           -DENABLE_NCNN_BACKEND=ON -DENABLE_WEBRWKV_BACKEND=OFF -DENABLE_LLAMACPP_BACKEND=ON -DENABLE_MNN_BACKEND=ON -DENABLE_PALM_BACKEND=ON ^
           -DENABLE_TTS=ON -DENABLE_VISION=ON -DENABLE_QNN_BACKEND=ON -DBUILD_EXAMPLES=OFF -DENABLE_SERVER=OFF ^
@@ -170,11 +181,11 @@ jobs:
       run: |
         rustup target add aarch64-apple-ios
         git init mlx-swift-examples
-        git -C mlx-swift-examples remote add origin https://github.com/mollysophia/mlx-swift-examples.git
+        git -C mlx-swift-examples remote add origin https://github.com/HaloWang/mlx-swift-examples.git
         git -C mlx-swift-examples fetch --depth 1 origin "$MLX_SWIFT_EXAMPLES_COMMIT"
         git -C mlx-swift-examples checkout --detach FETCH_HEAD
         cd mlx-swift-examples
-        xcodebuild -project mlx-swift-examples.xcodeproj -scheme MLXModelFFI -configuration Release -derivedDataPath build -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO
+        xcodebuild -project mlx-swift-examples.xcodeproj -scheme MLXModelFFI -configuration Release -derivedDataPath build -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO OTHER_SWIFT_FLAGS="\$(inherited) -file-prefix-map $GITHUB_WORKSPACE=. -debug-prefix-map $GITHUB_WORKSPACE=." OTHER_CFLAGS="\$(inherited) -ffile-prefix-map=$GITHUB_WORKSPACE=." OTHER_CPLUSPLUSFLAGS="\$(inherited) -ffile-prefix-map=$GITHUB_WORKSPACE=."
         cp build/Build/Products/Release-iphoneos/libMLXModelFFI.a ../src/backends/mlx/prebuilt/ios-arm64/libMLXModelFFI.a
         cp build/Build/Products/Release-iphoneos/mlx-swift_Cmlx.bundle/default.metallib ../src/backends/mlx/prebuilt/ios-arm64/default.metallib
         mlx_archive="$GITHUB_WORKSPACE/src/backends/mlx/prebuilt/ios-arm64/libMLXModelFFI.a"
@@ -269,18 +280,20 @@ jobs:
     - name: build-arm64
       run: |
         git init mlx-swift-examples
-        git -C mlx-swift-examples remote add origin https://github.com/mollysophia/mlx-swift-examples.git
+        git -C mlx-swift-examples remote add origin https://github.com/HaloWang/mlx-swift-examples.git
         git -C mlx-swift-examples fetch --depth 1 origin "$MLX_SWIFT_EXAMPLES_COMMIT"
         git -C mlx-swift-examples checkout --detach FETCH_HEAD
         cd mlx-swift-examples
-        xcodebuild -project mlx-swift-examples.xcodeproj -scheme MLXModelFFI -configuration Release -derivedDataPath build -destination 'platform=OS X'
+        xcodebuild -project mlx-swift-examples.xcodeproj -scheme MLXModelFFI -configuration Release -derivedDataPath build -destination 'platform=OS X' OTHER_SWIFT_FLAGS="\$(inherited) -file-prefix-map $GITHUB_WORKSPACE=. -debug-prefix-map $GITHUB_WORKSPACE=." OTHER_CFLAGS="\$(inherited) -ffile-prefix-map=$GITHUB_WORKSPACE=." OTHER_CPLUSPLUSFLAGS="\$(inherited) -ffile-prefix-map=$GITHUB_WORKSPACE=."
         cp build/Build/Products/Release/libMLXModelFFI.a ../src/backends/mlx/prebuilt/macos-arm64/libMLXModelFFI.a
         cd ..
         rm -rf build-arm64 # build-arm64-debug
         mkdir build-arm64 && cd build-arm64
         cmake .. -DENABLE_NCNN_BACKEND=ON -DENABLE_WEBRWKV_BACKEND=ON -DENABLE_MNN_BACKEND=ON -DENABLE_LLAMACPP_BACKEND=ON -DENABLE_MLX_BACKEND=ON -DENABLE_PALM_BACKEND=ON \
-          -DENABLE_TTS=ON -DENABLE_VISION=ON -DENABLE_WHISPER=ON -DENABLE_COREML_BACKEND=ON -DBUILD_EXAMPLES=OFF -DENABLE_SERVER=OFF -DCMAKE_BUILD_TYPE=Release \
-          -DRWKV_MOBILE_ENABLE_DEBUG_SYMBOLS=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+          -DENABLE_TTS=ON -DENABLE_VISION=ON -DENABLE_WHISPER=ON -DENABLE_COREML_BACKEND=ON -DBUILD_EXAMPLES=OFF -DENABLE_SERVER=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
+          -DRWKV_MOBILE_ENABLE_DEBUG_SYMBOLS=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+          -DCMAKE_C_FLAGS="-ffile-prefix-map=$GITHUB_WORKSPACE=." -DCMAKE_CXX_FLAGS="-ffile-prefix-map=$GITHUB_WORKSPACE=." \
+          -DCMAKE_OBJC_FLAGS="-ffile-prefix-map=$GITHUB_WORKSPACE=." -DCMAKE_OBJCXX_FLAGS="-ffile-prefix-map=$GITHUB_WORKSPACE=."
         cmake --build . -j 8
         mkdir -p ../symbols/macos-aarch64
         dsymutil librwkv_mobile.dylib -o ../symbols/macos-aarch64/librwkv_mobile.dylib.dSYM

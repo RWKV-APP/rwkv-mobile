@@ -129,6 +129,17 @@ struct DecodeStepTiming {
 };
 } // namespace
 
+static bool tokens_end_with_next(const std::vector<int> &tokens, int next, const std::vector<int> &suffix) {
+    const size_t count = tokens.size() + 1;
+    if (count < suffix.size()) return false;
+    for (size_t i = 0; i < suffix.size(); ++i) {
+        const size_t index = count - suffix.size() + i;
+        const int token = index == tokens.size() ? next : tokens[index];
+        if (token != suffix[i]) return false;
+    }
+    return true;
+}
+
 const int chinese_tokens_start = 10250;
 const int chinese_tokens_end = 18493;
 
@@ -1438,10 +1449,15 @@ int Runtime::chat(int model_id, std::vector<std::string> inputs,
 
     model->is_generating = true;
     model->stop_signal = false;
-    model->response_buffer.clear();
-    model->response_buffer_ids.clear();
-    model->response_buffer_decoded_tokens = 0;
-    model->response_buffer_eos_found = false;
+    {
+        std::lock_guard<std::mutex> lock(model->response_buffer_mutex);
+        model->response_buffer.clear();
+        model->response_buffer_ids.clear();
+        model->response_buffer_decoded_tokens = 0;
+        model->response_buffer_eos_found = false;
+    }
+
+    bool eos_found = false;
 
     if (force_lang == 1) {
         LOGI("forcing output language to Chinese\n");
@@ -1572,9 +1588,13 @@ int Runtime::chat(int model_id, std::vector<std::string> inputs,
     } else {
         role_for_parsing = history_ends_with_user_message ? model->response_role : model->user_role;
     }
-    model->response_buffer = suffix_after_last_chat_role_marker(*model, input_text, role_for_parsing);
-    model->response_buffer_ids = model->tokenizer->encode(model->response_buffer);
-    model->response_buffer_decoded_tokens = (int)model->response_buffer_ids.size();
+    const std::string response_prefix = suffix_after_last_chat_role_marker(*model, input_text, role_for_parsing);
+    {
+        std::lock_guard<std::mutex> lock(model->response_buffer_mutex);
+        model->response_buffer = response_prefix;
+        model->response_buffer_ids = model->tokenizer->encode(model->response_buffer);
+        model->response_buffer_decoded_tokens = (int)model->response_buffer_ids.size();
+    }
     int ret;
 
     model->sampler->clear_occurences();
@@ -1620,13 +1640,69 @@ int Runtime::chat(int model_id, std::vector<std::string> inputs,
     }
 
     int decoded_idx = 0;
-    bool is_pseudo_thinking = enable_reasoning && has_prefilled_thinking_end(model->response_buffer);
+    bool is_pseudo_thinking = enable_reasoning && has_prefilled_thinking_end(response_prefix);
     bool thinking_end_tag_found = is_pseudo_thinking;
-    std::string thinking_suffix = model->response_buffer;
+    std::string thinking_suffix = response_prefix;
     bool first_token_ban_thinking_tag = !enable_reasoning || is_pseudo_thinking || force_reasoning;
+    bool device_greedy_enabled = true;
+    bool device_sample_enabled = true;
+    DeviceSampleParameters device_parameters;
+    bool device_pending = false;
+    int device_steps = 0;
+    auto finish_device = [&](bool rollback, bool account_wait = true) {
+        const auto started = std::chrono::steady_clock::now();
+        const int status = model->backend->device_greedy_finish(rollback, logits);
+        const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count();
+        if (account_wait && device_steps > 0) {
+            std::lock_guard<std::mutex> lock(model->speed_samples_mutex);
+            // Include the final GPU wait in the last accepted decode sample.
+            if (!model->decode_samples_us.empty()) model->decode_samples_us.back().duration_us += elapsed;
+        }
+        device_pending = false;
+        return status;
+    };
 
     for (int i = 0; i < max_length; i++) {
         DecodeStepTiming timing("chat_step", model_id, i, 1);
+        const bool use_device = device_greedy_enabled && i > 2 &&
+            (model->sampler->get_top_k() == 1 || std::fabs(model->sampler->get_top_p()) < 1e-4f) &&
+            model->sampler->get_presence_penalty() == 0.0f && model->sampler->get_frequency_penalty() == 0.0f &&
+            model->sampler->get_token_banned().empty();
+        const bool use_proposal = device_sample_enabled && !use_device && i > 2 &&
+            model->sampler->prepare_device_sample(model->backend->get_num_vocab(), device_parameters);
+        if (!use_device && !use_proposal && device_pending) {
+            ret = finish_device(false);
+            if (ret) { model->is_generating = false; return ret; }
+        }
+        auto device_started = std::chrono::steady_clock::now();
+        bool proposal_submitted = false;
+        int proposed_idx = 0;
+        if (use_proposal) {
+            ret = model->backend->device_sample_proposal(device_parameters, proposed_idx, logits);
+            if (ret == RWKV_ERROR_UNSUPPORTED) {
+                device_sample_enabled = false;
+                if (device_pending) {
+                    ret = finish_device(false);
+                    if (ret) { model->is_generating = false; return ret; }
+                }
+            } else if (ret) {
+                model->is_generating = false;
+                return ret;
+            } else {
+                proposal_submitted = device_pending = true;
+            }
+        }
+        auto discard_device = [&]() {
+            // A rejected token still leaves CPU penalties in the legacy cache logits.
+            Tensor1D sampled_logits;
+            if (proposal_submitted) sampled_logits = logits.copy();
+            const int status = finish_device(true, false);
+            if (proposal_submitted && status == RWKV_SUCCESS) logits = std::move(sampled_logits);
+            const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - device_started).count();
+            std::lock_guard<std::mutex> lock(model->speed_samples_mutex);
+            if (!model->decode_samples_us.empty()) model->decode_samples_us.back().duration_us += elapsed;
+            return status;
+        };
         model->sampler->apply_penalties(logits, model->backend->get_num_vocab());
 
         if (i <= 2 && first_token_ban_thinking_tag) {
@@ -1642,9 +1718,33 @@ int Runtime::chat(int model_id, std::vector<std::string> inputs,
         }
 
         timing.mark(DecodeStepTiming::Penalty);
-        decoded_idx = model->sampler->sample(logits, model->backend->get_num_vocab());
+        bool device_advanced = false;
+        if (use_device) {
+            device_started = std::chrono::steady_clock::now();
+            ret = model->backend->device_greedy_step(decoded_idx);
+            if (ret == RWKV_ERROR_UNSUPPORTED && !device_pending) {
+                device_greedy_enabled = false;
+            } else if (ret) {
+                model->is_generating = false;
+                return ret;
+            } else {
+                device_advanced = device_pending = true;
+            }
+        }
+        if (!device_advanced) decoded_idx = model->sampler->sample(logits, model->backend->get_num_vocab());
+        if (proposal_submitted) {
+            if (decoded_idx == proposed_idx) device_advanced = true;
+            else {
+                ret = discard_device();
+                if (ret) { model->is_generating = false; return ret; }
+            }
+        }
         timing.mark(DecodeStepTiming::Sample);
         if (decoded_idx == 0) {
+            if (device_pending) {
+                ret = discard_device();
+                if (ret) { model->is_generating = false; return ret; }
+            }
             LOGD("sampled token 0, stopping generation; eval one more step with EOS for state cache\n");
             int eos_token_id = model->tokenizer->encode(model->eos_token)[0];
             timing.eval_active = 1;
@@ -1660,27 +1760,17 @@ int Runtime::chat(int model_id, std::vector<std::string> inputs,
             break;
         }
 
-        auto tmp_tokens = response_ids_raw;
-        tmp_tokens.emplace_back(decoded_idx);
-        auto compare_token_seq = [&](const std::vector<int> token_seq) -> bool {
-            if (tmp_tokens.size() < token_seq.size()) {
-                return false;
-            }
-            for (size_t i = 0; i < token_seq.size(); i++) {
-                if (tmp_tokens[tmp_tokens.size() - token_seq.size() + i] != token_seq[i]) {
-                    return false;
-                }
-            }
-            return true;
-        };
-
         for (auto &stop_code : model->stop_token_seqs) {
             if (enable_reasoning && !thinking_end_tag_found && stop_code[0] == 261) { // \n\n
                 continue;
             }
-            if (compare_token_seq(stop_code)) {
+            if (tokens_end_with_next(response_ids_raw, decoded_idx, stop_code)) {
                 LOGD("stop code found: %s\n", escape_special_chars(model->tokenizer->decode(stop_code)).c_str());
-                model->response_buffer_eos_found = true;
+                eos_found = true;
+                {
+                    std::lock_guard<std::mutex> lock(model->response_buffer_mutex);
+                    model->response_buffer_eos_found = true;
+                }
                 break;
             }
         }
@@ -1691,13 +1781,29 @@ int Runtime::chat(int model_id, std::vector<std::string> inputs,
         }
 
         timing.mark(DecodeStepTiming::Schedule);
-        if (model->response_buffer_eos_found || model->stop_signal) {
-            LOGD("stopping generation, eos_found: %d, stop_signal: %d\n", model->response_buffer_eos_found, model->stop_signal);
+        if (eos_found || model->stop_signal) {
+            if (device_pending) {
+                ret = discard_device();
+                if (ret) { model->is_generating = false; return ret; }
+            }
+            LOGD("stopping generation, eos_found: %d, stop_signal: %d\n", eos_found, model->stop_signal.load());
             break;
         }
 
+        bool deferred_pending = false;
         timing.eval_active = 1;
-        ret = eval_logits(model_id, decoded_idx, logits);
+        const auto deferred_started = std::chrono::steady_clock::now();
+        if (device_advanced) {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - device_started).count();
+            _record_speed_sample(*model, false, 1, std::max<int64_t>(1, elapsed));
+            ++device_steps;
+            ret = RWKV_SUCCESS;
+        } else {
+            // Submit the first accepted token before delivering it; read its logits afterward.
+            ret = i == 0 ? model->backend->eval_deferred(decoded_idx) : RWKV_ERROR_UNSUPPORTED;
+            if (ret == RWKV_ERROR_UNSUPPORTED) ret = eval_logits(model_id, decoded_idx, logits);
+            else if (ret == RWKV_SUCCESS) deferred_pending = true;
+        }
         timing.mark(DecodeStepTiming::Eval);
         if (ret) {
             model->is_generating = false;
@@ -1706,22 +1812,40 @@ int Runtime::chat(int model_id, std::vector<std::string> inputs,
         }
 
         response_ids_raw.emplace_back(decoded_idx);
-        model->response_buffer_ids.emplace_back(decoded_idx);
-
-        if (callback) {
-            std::string decoded = model->tokenizer->decode(decoded_idx);
-            model->response_buffer += decoded;
-            model->response_buffer_decoded_tokens = (int)model->response_buffer_ids.size();
+        std::string decoded;
+        std::string callback_response;
+        {
+            std::lock_guard<std::mutex> lock(model->response_buffer_mutex);
+            model->response_buffer_ids.emplace_back(decoded_idx);
             if (callback) {
-                callback(model->response_buffer.c_str(), decoded_idx, decoded.c_str());
+                decoded = model->tokenizer->decode(decoded_idx);
+                model->response_buffer += decoded;
+                model->response_buffer_decoded_tokens = (int)model->response_buffer_ids.size();
+                callback_response = model->response_buffer;
+            }
+            if (!model->response_buffer.empty() && model->response_buffer[0] == ' ') {
+                model->response_buffer = model->response_buffer.substr(1);
             }
         }
-        if (model->response_buffer.size() > 0 && model->response_buffer[0] == ' ') {
-            model->response_buffer = model->response_buffer.substr(1);
-        }
+        if (callback) callback(callback_response.c_str(), decoded_idx, decoded.c_str());
 
+        if (deferred_pending) {
+            ret = model->backend->finish_deferred(logits);
+            const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - deferred_started).count();
+            _record_speed_sample(*model, false, 1, std::max<int64_t>(1, elapsed));
+            if (ret) {
+                model->is_generating = false;
+                LOGE("failed to finish first-token eval\n");
+                return ret;
+            }
+        }
         model->sampler->update_occurences(decoded_idx);
         timing.mark(DecodeStepTiming::Publish);
+    }
+
+    if (device_pending) {
+        ret = finish_device(false);
+        if (ret) { model->is_generating = false; return ret; }
     }
 
     if (response_ids_raw.size() > 0 && max_length > 0) {
@@ -1733,17 +1857,20 @@ int Runtime::chat(int model_id, std::vector<std::string> inputs,
             return ret;
         }
         LOGI("registered state for text: \"%s\"", escape_special_chars(model->tokenizer->decode(node->ids)).c_str());
-        if (model->response_buffer.size() > 0 && model->response_buffer[0] == ' ') {
-            model->response_buffer = model->response_buffer.substr(1);
+        {
+            std::lock_guard<std::mutex> lock(model->response_buffer_mutex);
+            if (model->response_buffer.size() > 0 && model->response_buffer[0] == ' ') {
+                model->response_buffer = model->response_buffer.substr(1);
+            }
+            model->response_buffer = remove_endl(model->response_buffer);
+            model->response_buffer = remove_ending_char(model->response_buffer, '\x17');
         }
-        model->response_buffer = remove_endl(model->response_buffer);
-        model->response_buffer = remove_ending_char(model->response_buffer, '\x17');
     }
 
-    model->is_generating = false;
     model->stop_signal = false;
 
     model->backend->cleanup_state_tree();
+    model->is_generating = false;
 
     return RWKV_SUCCESS;
 }
@@ -1795,17 +1922,21 @@ int Runtime::chat_batch(int model_id, std::vector<std::vector<std::string>> inpu
     model->is_generating = true;
     model->stop_signal = false;
 
-    model->response_buffer_batch.resize(batch_size);
-    model->response_buffer_ids_batch.resize(batch_size);
-    model->response_buffer_decoded_tokens_batch.resize(batch_size);
-    model->response_buffer_eos_found_batch.resize(batch_size);
-    for (int batch_idx = 0; batch_idx < batch_size; batch_idx++) {
-        model->response_buffer_batch[batch_idx] = "";
-        model->response_buffer_ids_batch[batch_idx].clear();
-        model->response_buffer_decoded_tokens_batch[batch_idx] = 0;
-        model->response_buffer_eos_found_batch[batch_idx] = false;
+    {
+        std::lock_guard<std::mutex> lock(model->response_buffer_mutex);
+        model->response_buffer_batch.resize(batch_size);
+        model->response_buffer_ids_batch.resize(batch_size);
+        model->response_buffer_decoded_tokens_batch.resize(batch_size);
+        model->response_buffer_eos_found_batch.assign(batch_size, false);
+        for (int batch_idx = 0; batch_idx < batch_size; batch_idx++) {
+            model->response_buffer_batch[batch_idx] = "";
+            model->response_buffer_ids_batch[batch_idx].clear();
+            model->response_buffer_decoded_tokens_batch[batch_idx] = 0;
+            model->response_buffer_eos_found_batch[batch_idx] = false;
+        }
     }
 
+    std::vector<bool> eos_found_batch(batch_size, false);
     std::vector<std::vector<int>> response_ids_raw_batch(batch_size);
 
     std::vector<std::string> input_texts(batch_size);
@@ -1880,15 +2011,18 @@ int Runtime::chat_batch(int model_id, std::vector<std::vector<std::string>> inpu
         } else {
             role_for_parsing = history_ends_with_user_message ? model->response_role : model->user_role;
         }
-        model->response_buffer_batch[batch_idx] = suffix_after_last_chat_role_marker(*model, input_texts[batch_idx], role_for_parsing);
-        if (model->response_buffer_batch[batch_idx].empty()) {
-            model->response_buffer_ids_batch[batch_idx].clear();
-            model->response_buffer_decoded_tokens_batch[batch_idx] = 0;
-        } else {
-            model->response_buffer_ids_batch[batch_idx] = model->tokenizer->encode(model->response_buffer_batch[batch_idx]);
-            model->response_buffer_decoded_tokens_batch[batch_idx] = (int)model->response_buffer_ids_batch[batch_idx].size();
+        {
+            std::lock_guard<std::mutex> lock(model->response_buffer_mutex);
+            model->response_buffer_batch[batch_idx] = suffix_after_last_chat_role_marker(*model, input_texts[batch_idx], role_for_parsing);
+            if (model->response_buffer_batch[batch_idx].empty()) {
+                model->response_buffer_ids_batch[batch_idx].clear();
+                model->response_buffer_decoded_tokens_batch[batch_idx] = 0;
+            } else {
+                model->response_buffer_ids_batch[batch_idx] = model->tokenizer->encode(model->response_buffer_batch[batch_idx]);
+                model->response_buffer_decoded_tokens_batch[batch_idx] = (int)model->response_buffer_ids_batch[batch_idx].size();
+            }
+            eos_found_batch[batch_idx] = false;
         }
-        model->response_buffer_eos_found_batch[batch_idx] = false;
 
         if (!input.empty() && !history_ends_with_user_message) {
             std::vector<int> ids = model->tokenizer->encode(" " + input[input.size() - 1]);
@@ -1897,9 +2031,12 @@ int Runtime::chat_batch(int model_id, std::vector<std::vector<std::string>> inpu
             }
         }
 
-        thinking_end_tag_found_batch[batch_idx] = enable_reasoning && has_prefilled_thinking_end(model->response_buffer_batch[batch_idx]);
-        is_pseudo_thinking_batch[batch_idx] = !enable_reasoning || thinking_end_tag_found_batch[batch_idx];
-        thinking_suffix_batch[batch_idx] = model->response_buffer_batch[batch_idx];
+        {
+            std::lock_guard<std::mutex> lock(model->response_buffer_mutex);
+            thinking_end_tag_found_batch[batch_idx] = enable_reasoning && has_prefilled_thinking_end(model->response_buffer_batch[batch_idx]);
+            is_pseudo_thinking_batch[batch_idx] = !enable_reasoning || thinking_end_tag_found_batch[batch_idx];
+            thinking_suffix_batch[batch_idx] = model->response_buffer_batch[batch_idx];
+        }
     }
 
     size_t common_prefix_len = 0;
@@ -2060,35 +2197,29 @@ int Runtime::chat_batch(int model_id, std::vector<std::vector<std::string>> inpu
             int original_j = active_batch_indices[j];
             if (decoded_idx[j] == 0) {
                 LOGD("sampled token 0 for batch %d; will eval with EOS for state cache\n", original_j);
-                model->response_buffer_eos_found_batch[original_j] = true;
+                eos_found_batch[original_j] = true;
+                {
+                    std::lock_guard<std::mutex> lock(model->response_buffer_mutex);
+                    model->response_buffer_eos_found_batch[original_j] = true;
+                }
                 if (!logits_final_set[original_j] && i == 0) {
                     logits_final_f32_batch[original_j] = prefill_logits_f32_batch[original_j];
                     logits_final_set[original_j] = true;
                 }
             }
 
-            auto tmp_tokens = response_ids_raw_batch[original_j];
-            tmp_tokens.emplace_back(decoded_idx[j]);
-            auto compare_token_seq = [&](const std::vector<int> token_seq) -> bool {
-                if (tmp_tokens.size() < token_seq.size()) {
-                    return false;
-                }
-                for (size_t k = 0; k < token_seq.size(); k++) {
-                    if (tmp_tokens[tmp_tokens.size() - token_seq.size() + k] != token_seq[k]) {
-                        return false;
-                    }
-                }
-                return true;
-            };
-
-            if (!model->response_buffer_eos_found_batch[original_j]) {
+            if (!eos_found_batch[original_j]) {
                 for (auto &stop_code : model->stop_token_seqs) {
                     if (enable_reasoning && !thinking_end_tag_found_batch[original_j] && stop_code[0] == 261) { // \n\n
                         continue;
                     }
-                    if (compare_token_seq(stop_code)) {
+                    if (tokens_end_with_next(response_ids_raw_batch[original_j], decoded_idx[j], stop_code)) {
                         LOGD("stop code found for batch %d: %s\n", original_j, escape_special_chars(model->tokenizer->decode(stop_code)).c_str());
-                        model->response_buffer_eos_found_batch[original_j] = true;
+                        eos_found_batch[original_j] = true;
+                        {
+                            std::lock_guard<std::mutex> lock(model->response_buffer_mutex);
+                            model->response_buffer_eos_found_batch[original_j] = true;
+                        }
                         std::any state_end;
                         model->backend->get_state_on_batch_slot(j, state_end);
                         state_batch[original_j] = std::move(state_end);
@@ -2120,7 +2251,7 @@ int Runtime::chat_batch(int model_id, std::vector<std::vector<std::string>> inpu
 
         std::vector<int> new_active_batch_indices;
         for (int j = 0; j < batch_size; j++) {
-            if (!model->response_buffer_eos_found_batch[j]) {
+            if (!eos_found_batch[j]) {
                 new_active_batch_indices.push_back(j);
             }
         }
@@ -2209,9 +2340,9 @@ int Runtime::chat_batch(int model_id, std::vector<std::vector<std::string>> inpu
         }
 
         timing.mark(DecodeStepTiming::Schedule);
-        auto all_eos_found = std::all_of(model->response_buffer_eos_found_batch.begin(), model->response_buffer_eos_found_batch.end(), [](bool eos_found) { return eos_found; });
+        auto all_eos_found = std::all_of(eos_found_batch.begin(), eos_found_batch.end(), [](bool eos_found) { return eos_found; });
         if (all_eos_found || model->stop_signal) {
-            LOGD("stopping generation, eos_found: %d, stop_signal: %d\n", all_eos_found, model->stop_signal);
+            LOGD("stopping generation, eos_found: %d, stop_signal: %d\n", all_eos_found, model->stop_signal.load());
             break;
         }
 
@@ -2277,13 +2408,16 @@ int Runtime::chat_batch(int model_id, std::vector<std::vector<std::string>> inpu
                 response_ids_raw_batch[original_j].emplace_back(eos_token_id);
                 continue;
             }
-            if (model->response_buffer_eos_found_batch[original_j]) {
+            if (eos_found_batch[original_j]) {
                 continue;
             }
             response_ids_raw_batch[original_j].emplace_back(decoded_idx[j]);
-            model->response_buffer_ids_batch[original_j].emplace_back(decoded_idx[j]);
-            if (model->response_buffer_batch[original_j].size() > 0 && model->response_buffer_batch[original_j][0] == ' ') {
-                model->response_buffer_batch[original_j] = model->response_buffer_batch[original_j].substr(1);
+            {
+                std::lock_guard<std::mutex> lock(model->response_buffer_mutex);
+                model->response_buffer_ids_batch[original_j].emplace_back(decoded_idx[j]);
+                if (model->response_buffer_batch[original_j].size() > 0 && model->response_buffer_batch[original_j][0] == ' ') {
+                    model->response_buffer_batch[original_j] = model->response_buffer_batch[original_j].substr(1);
+                }
             }
 
             occurences_batch[original_j][decoded_idx[j]]++;
@@ -2299,7 +2433,7 @@ int Runtime::chat_batch(int model_id, std::vector<std::vector<std::string>> inpu
 
     // save state for not finished batches
     for (int j = 0; j < batch_size; j++) {
-        if (!model->response_buffer_eos_found_batch[j]) {
+        if (!eos_found_batch[j]) {
             int active_slot = original_to_active_mapping[j];
             if (active_slot >= 0) {
                 model->backend->get_state_on_batch_slot(active_slot, state_batch[j]);
@@ -2342,15 +2476,18 @@ int Runtime::chat_batch(int model_id, std::vector<std::vector<std::string>> inpu
                 return r;
             }
 
-            model->response_buffer_batch[j] = remove_endl(model->response_buffer_batch[j]);
-            model->response_buffer_batch[j] = remove_ending_char(model->response_buffer_batch[j], '\x17');
+            {
+                std::lock_guard<std::mutex> lock(model->response_buffer_mutex);
+                model->response_buffer_batch[j] = remove_endl(model->response_buffer_batch[j]);
+                model->response_buffer_batch[j] = remove_ending_char(model->response_buffer_batch[j], '\x17');
+            }
         }
     }
 
-    model->is_generating = false;
     model->stop_signal = false;
 
     model->backend->cleanup_state_tree();
+    model->is_generating = false;
 
     return RWKV_SUCCESS;
 }
@@ -2374,15 +2511,12 @@ int Runtime::prefill_to_cache(int model_id, std::string text) {
         return RWKV_SUCCESS;
     }
 
-    model->backend->set_state(node->state);
-
     Tensor1D logits;
-    int ret = eval_logits(model_id, ids, logits);
+    int ret = eval_logits(model_id, new_ids_to_prefill, logits);
     if (ret) {
         return ret;
     }
-    model->backend->register_state_checkpoint(node, ids, logits);
-    return RWKV_SUCCESS;
+    return model->backend->register_state_checkpoint(node, new_ids_to_prefill, logits);
 }
 
 int Runtime::set_prompt(int model_id, std::string prompt) {
@@ -3233,10 +3367,15 @@ int Runtime::gen_completion_batch(int model_id, std::vector<std::string> prompts
     model->is_generating = true;
     model->stop_signal = false;
 
-    model->response_buffer_batch.resize(batch_size);
-    model->response_buffer_ids_batch.resize(batch_size);
-    model->response_buffer_decoded_tokens_batch.resize(batch_size);
-    model->response_buffer_eos_found_batch.resize(batch_size);
+    {
+        std::lock_guard<std::mutex> lock(model->response_buffer_mutex);
+        model->response_buffer_batch.resize(batch_size);
+        model->response_buffer_ids_batch.resize(batch_size);
+        model->response_buffer_decoded_tokens_batch.resize(batch_size);
+        model->response_buffer_eos_found_batch.assign(batch_size, false);
+    }
+
+    std::vector<bool> eos_found_batch(batch_size, false);
 
     reset_inference_speed_stats(model_id);
 
@@ -3277,10 +3416,13 @@ int Runtime::gen_completion_batch(int model_id, std::vector<std::string> prompts
         _prefill_progress_finish(model_id);
 
         for (int batch_idx = 0; batch_idx < batch_size; batch_idx++) {
-            model->response_buffer_batch[batch_idx] = prompts[batch_idx];
-            model->response_buffer_ids_batch[batch_idx] = ids;
-            model->response_buffer_decoded_tokens_batch[batch_idx] = (int) ids.size();
-            model->response_buffer_eos_found_batch[batch_idx] = false;
+            {
+                std::lock_guard<std::mutex> lock(model->response_buffer_mutex);
+                model->response_buffer_batch[batch_idx] = prompts[batch_idx];
+                model->response_buffer_ids_batch[batch_idx] = ids;
+                model->response_buffer_decoded_tokens_batch[batch_idx] = (int) ids.size();
+                eos_found_batch[batch_idx] = false;
+            }
 
             Tensor1D slot_prefill_logits = shared_prefill_logits.copy();
             model->sampler->apply_penalties(slot_prefill_logits, model->backend->get_num_vocab(), occurences_batch[batch_idx],
@@ -3299,10 +3441,13 @@ int Runtime::gen_completion_batch(int model_id, std::vector<std::string> prompts
         }
     } else {
         for (int batch_idx = 0; batch_idx < batch_size; batch_idx++) {
-            model->response_buffer_batch[batch_idx] = "";
-            model->response_buffer_ids_batch[batch_idx].clear();
-            model->response_buffer_decoded_tokens_batch[batch_idx] = 0;
-            model->response_buffer_eos_found_batch[batch_idx] = false;
+            {
+                std::lock_guard<std::mutex> lock(model->response_buffer_mutex);
+                model->response_buffer_batch[batch_idx] = "";
+                model->response_buffer_ids_batch[batch_idx].clear();
+                model->response_buffer_decoded_tokens_batch[batch_idx] = 0;
+                eos_found_batch[batch_idx] = false;
+            }
 
             std::vector<int> ids = model->tokenizer->encode(prompts[batch_idx]);
             Tensor1D batch_prefill_logits;
@@ -3342,9 +3487,12 @@ int Runtime::gen_completion_batch(int model_id, std::vector<std::string> prompts
             }
             _prefill_progress_finish(model_id);
 
-            model->response_buffer_batch[batch_idx] = prompts[batch_idx];
-            model->response_buffer_ids_batch[batch_idx] = ids;
-            model->response_buffer_decoded_tokens_batch[batch_idx] = (int)ids.size();
+            {
+                std::lock_guard<std::mutex> lock(model->response_buffer_mutex);
+                model->response_buffer_batch[batch_idx] = prompts[batch_idx];
+                model->response_buffer_ids_batch[batch_idx] = ids;
+                model->response_buffer_decoded_tokens_batch[batch_idx] = (int)ids.size();
+            }
 
             if (batch_prefill_logits.data_ptr == nullptr) {
                 if (!nodes_batch[batch_idx]->logits.empty()) {
@@ -3390,14 +3538,18 @@ int Runtime::gen_completion_batch(int model_id, std::vector<std::string> prompts
             decoded_idx_batch = model->sampler->sample_batch(logits, model->backend->get_num_vocab(), model->backend->get_num_vocab(), batch_size);
         }
 
-        for (int batch_idx = 0; batch_idx < batch_size; batch_idx++) {
-            if (!model->response_buffer_eos_found_batch[batch_idx]) {
-                model->response_buffer_eos_found_batch[batch_idx] = (decoded_idx_batch[batch_idx] == stop_code);
-                model->response_buffer_ids_batch[batch_idx].push_back(decoded_idx_batch[batch_idx]);
-                if (callback_batch) {
-                    decoded_text_batch[batch_idx] = model->tokenizer->decode(decoded_idx_batch[batch_idx]);
-                    model->response_buffer_batch[batch_idx] += decoded_text_batch[batch_idx];
-                    model->response_buffer_decoded_tokens_batch[batch_idx] = (int)model->response_buffer_ids_batch[batch_idx].size();
+        {
+            std::lock_guard<std::mutex> lock(model->response_buffer_mutex);
+            for (int batch_idx = 0; batch_idx < batch_size; batch_idx++) {
+                if (!eos_found_batch[batch_idx]) {
+                    eos_found_batch[batch_idx] = (decoded_idx_batch[batch_idx] == stop_code);
+                    model->response_buffer_eos_found_batch[batch_idx] = eos_found_batch[batch_idx];
+                    model->response_buffer_ids_batch[batch_idx].push_back(decoded_idx_batch[batch_idx]);
+                    if (callback_batch) {
+                        decoded_text_batch[batch_idx] = model->tokenizer->decode(decoded_idx_batch[batch_idx]);
+                        model->response_buffer_batch[batch_idx] += decoded_text_batch[batch_idx];
+                        model->response_buffer_decoded_tokens_batch[batch_idx] = (int)model->response_buffer_ids_batch[batch_idx].size();
+                    }
                 }
             }
         }
@@ -3409,12 +3561,12 @@ int Runtime::gen_completion_batch(int model_id, std::vector<std::string> prompts
             return ret;
         }
 
-        if (std::all_of(model->response_buffer_eos_found_batch.begin(), model->response_buffer_eos_found_batch.end(), [](bool eos_found) { return eos_found; }) || model->stop_signal) {
+        if (std::all_of(eos_found_batch.begin(), eos_found_batch.end(), [](bool eos_found) { return eos_found; }) || model->stop_signal) {
             break;
         }
 
         for (int batch_idx = 0; batch_idx < batch_size; batch_idx++) {
-            if (!model->response_buffer_eos_found_batch[batch_idx]) {
+            if (!eos_found_batch[batch_idx]) {
                 occurences_batch[batch_idx][decoded_idx_batch[batch_idx]]++;
             }
         }
@@ -3435,10 +3587,14 @@ int Runtime::gen_completion(int model_id, std::string prompt, int max_length, in
         LOGE("gen_completion: Backend or tokenizer for model ID %d not found", model_id);
         return RWKV_ERROR_RUNTIME | RWKV_ERROR_INVALID_PARAMETERS;
     }
-    model->response_buffer = "";
-    model->response_buffer_ids.clear();
-    model->response_buffer_decoded_tokens = 0;
-    model->response_buffer_eos_found = false;
+    {
+        std::lock_guard<std::mutex> lock(model->response_buffer_mutex);
+        model->response_buffer = "";
+        model->response_buffer_ids.clear();
+        model->response_buffer_decoded_tokens = 0;
+        model->response_buffer_eos_found = false;
+    }
+    bool eos_found = false;
     model->is_generating = true;
     model->stop_signal = false;
     model->sampler->clear_occurences();
@@ -3478,10 +3634,13 @@ int Runtime::gen_completion(int model_id, std::string prompt, int max_length, in
     }
     _prefill_progress_finish(model_id);
 
-    model->response_buffer = prompt;
-    model->response_buffer_ids = ids;
-    model->response_buffer_decoded_tokens = (int)ids.size();
-    static int idx = 0;
+    {
+        std::lock_guard<std::mutex> lock(model->response_buffer_mutex);
+        model->response_buffer = prompt;
+        model->response_buffer_ids = ids;
+        model->response_buffer_decoded_tokens = (int)ids.size();
+    }
+    int idx = 0;
     if (logits.data_ptr == nullptr) {
         if (!node->logits.empty()) {
             logits = Tensor1D::make(node->logits.data(), TensorDType::F32, (size_t)model->backend->get_num_vocab()).copy();
@@ -3495,8 +3654,12 @@ int Runtime::gen_completion(int model_id, std::string prompt, int max_length, in
         model->sampler->apply_penalties(logits, model->backend->get_num_vocab());
         idx = model->sampler->sample(logits, model->backend->get_num_vocab());
 
-        model->response_buffer_eos_found = (idx == stop_code);
-        model->response_buffer_ids.push_back(idx);
+        eos_found = (idx == stop_code);
+        {
+            std::lock_guard<std::mutex> lock(model->response_buffer_mutex);
+            model->response_buffer_eos_found = eos_found;
+            model->response_buffer_ids.push_back(idx);
+        }
         int ret = eval_logits(model_id, idx, logits);
         if (ret) {
             model->is_generating = false;
@@ -3505,12 +3668,20 @@ int Runtime::gen_completion(int model_id, std::string prompt, int max_length, in
         }
         if (callback) {
             std::string next = model->tokenizer->decode(idx);
-            model->response_buffer += next;
-            model->response_buffer_decoded_tokens = (int)model->response_buffer_ids.size();
-            callback(model->response_buffer.c_str(), idx, next.c_str());
+            std::string callback_response;
+            {
+                std::lock_guard<std::mutex> lock(model->response_buffer_mutex);
+                // A polling reader may already have decoded this token during eval.
+                if (model->response_buffer_decoded_tokens < (int)model->response_buffer_ids.size()) {
+                    model->response_buffer += next;
+                    model->response_buffer_decoded_tokens = (int)model->response_buffer_ids.size();
+                }
+                callback_response = model->response_buffer;
+            }
+            callback(callback_response.c_str(), idx, next.c_str());
         }
 
-        if (model->response_buffer_eos_found || model->stop_signal) {
+        if (eos_found || model->stop_signal) {
             break;
         }
 
@@ -3614,7 +3785,7 @@ int Runtime::gen_completion_singletoken_topk(int model_id, std::string prompt, i
     }
     _prefill_progress_finish(model_id);
 
-    static int idx = 0;
+    int idx = 0;
     if (logits.data_ptr == nullptr) {
         if (!node->logits.empty()) {
             logits = Tensor1D::make(node->logits.data(), TensorDType::F32, (size_t)model->backend->get_num_vocab()).copy();
@@ -4108,6 +4279,7 @@ void Runtime::clear_response_buffer(int model_id) {
         return;
     }
     auto &model = _models.at(model_id);
+    std::lock_guard<std::mutex> lock(model->response_buffer_mutex);
     model->response_buffer.clear();
     model->response_buffer_ids.clear();
     model->response_buffer_decoded_tokens = 0;
@@ -4161,10 +4333,17 @@ int Runtime::get_vocab_size(int model_id) {
 }
 
 std::string Runtime::get_response_buffer_content(int model_id) {
+    return get_response_buffer_content(model_id, nullptr);
+}
+
+std::string Runtime::get_response_buffer_content(int model_id, bool *eos_found) {
+    if (eos_found) *eos_found = false;
     if (_models.find(model_id) == _models.end()) {
         return "";
     }
     auto &model = _models.at(model_id);
+    std::lock_guard<std::mutex> lock(model->response_buffer_mutex);
+    if (eos_found) *eos_found = model->response_buffer_eos_found;
     const int total = (int)model->response_buffer_ids.size();
     for (int i = model->response_buffer_decoded_tokens; i < total; i++) {
         model->response_buffer += model->tokenizer->decode(model->response_buffer_ids[i]);
@@ -4181,6 +4360,7 @@ const std::vector<int32_t> Runtime::get_response_buffer_ids(int model_id) {
         return {};
     }
     auto &model = _models.at(model_id);
+    std::lock_guard<std::mutex> lock(model->response_buffer_mutex);
     return model->response_buffer_ids;
 }
 
@@ -4189,6 +4369,7 @@ int Runtime::get_response_buffer_tokens_count(int model_id) {
         return 0;
     }
     auto &model = _models.at(model_id);
+    std::lock_guard<std::mutex> lock(model->response_buffer_mutex);
     return (int)model->response_buffer_ids.size();
 }
 
@@ -4197,6 +4378,7 @@ std::vector<int> Runtime::get_response_buffer_tokens_count_batch(int model_id) {
         return {};
     }
     auto &model = _models.at(model_id);
+    std::lock_guard<std::mutex> lock(model->response_buffer_mutex);
     std::vector<int> counts;
     for (int i = 0; i < model->response_buffer_ids_batch.size(); i++) {
         counts.push_back(model->response_buffer_ids_batch[i].size());
@@ -4232,14 +4414,22 @@ bool Runtime::get_response_buffer_eos_found(int model_id) {
         return false;
     }
     auto &model = _models.at(model_id);
+    std::lock_guard<std::mutex> lock(model->response_buffer_mutex);
     return model->response_buffer_eos_found;
 }
 
 std::vector<std::string> Runtime::get_response_buffer_content_batch(int model_id) {
+    return get_response_buffer_content_batch(model_id, nullptr);
+}
+
+std::vector<std::string> Runtime::get_response_buffer_content_batch(int model_id, std::vector<bool> *eos_founds) {
+    if (eos_founds) eos_founds->clear();
     if (_models.find(model_id) == _models.end()) {
         return {};
     }
     auto &model = _models.at(model_id);
+    std::lock_guard<std::mutex> lock(model->response_buffer_mutex);
+    if (eos_founds) *eos_founds = model->response_buffer_eos_found_batch;
     if (model->response_buffer_decoded_tokens_batch.size() < model->response_buffer_ids_batch.size()) {
         model->response_buffer_decoded_tokens_batch.resize(model->response_buffer_ids_batch.size(), 0);
     }
@@ -4262,6 +4452,7 @@ std::vector<std::vector<int32_t>> Runtime::get_response_buffer_ids_batch(int mod
         return {};
     }
     auto &model = _models.at(model_id);
+    std::lock_guard<std::mutex> lock(model->response_buffer_mutex);
     return model->response_buffer_ids_batch;
 }
 
@@ -4270,6 +4461,7 @@ std::vector<bool> Runtime::get_response_buffer_eos_found_batch(int model_id) {
         return {};
     }
     auto &model = _models.at(model_id);
+    std::lock_guard<std::mutex> lock(model->response_buffer_mutex);
     return model->response_buffer_eos_found_batch;
 }
 

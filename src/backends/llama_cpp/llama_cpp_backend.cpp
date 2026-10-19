@@ -5,6 +5,9 @@
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 #if defined(__ANDROID__) || defined(__OHOS__)
 #include <unistd.h>
 #endif
@@ -165,6 +168,13 @@ int llama_cpp_backend::load_model(std::string model_path, void * extra) {
     ctx_params.n_ctx = n_ctx_per_seq * (uint32_t) kMaxBatchSlots;
     ctx_params.n_seq_max = kMaxBatchSlots;
     ctx_params.kv_unified = false;
+#if defined(__APPLE__) && TARGET_OS_OSX
+    if (model_params.n_gpu_layers == 0) {
+        ctx_params.n_threads = ctx_params.n_threads_batch =
+            macos_llama_cpu_threads(std::thread::hardware_concurrency());
+        LOGI("llama.cpp CPU threads: %d", ctx_params.n_threads);
+    }
+#endif
 #if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__) && !defined(__OHOS__))
     if (model_params.n_gpu_layers == 0) {
         const unsigned int available = std::max(1u, std::thread::hardware_concurrency());
@@ -195,6 +205,23 @@ int llama_cpp_backend::load_model(std::string model_path, void * extra) {
             LOGW("ignored invalid RWKV_LLAMACPP_UBATCH: %s", value);
         }
     }
+#endif
+#if defined(__linux__) && !defined(__ANDROID__) && !defined(__OHOS__)
+    // Explicit Linux CPU profiles must reach the actual context, not only the environment.
+    auto requested_threads = [](const char *name, int fallback) {
+        const char *value = std::getenv(name);
+        if (!value || !*value) return fallback;
+        errno = 0;
+        char *end = nullptr;
+        const long requested = std::strtol(value, &end, 10);
+        if (errno == 0 && end != value && *end == '\0' &&
+            requested > 0 && requested <= GGML_MAX_N_THREADS) return (int)requested;
+        LOGW("ignored invalid %s: %s", name, value);
+        return fallback;
+    };
+    ctx_params.n_threads = requested_threads("RWKV_LLAMACPP_THREADS", ctx_params.n_threads);
+    ctx_params.n_threads_batch = requested_threads("RWKV_LLAMACPP_THREADS_BATCH", ctx_params.n_threads);
+    LOGI("llama.cpp effective CPU threads: decode=%d batch=%d", ctx_params.n_threads, ctx_params.n_threads_batch);
 #endif
     ctx = llama_init_from_model(model, ctx_params);
 #if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__) && !defined(__OHOS__))
@@ -287,22 +314,21 @@ int llama_cpp_backend::load_model(std::string model_path, void * extra) {
 }
 
 int llama_cpp_backend::eval(int id, Tensor1D & logits) {
+    const int ret = eval_deferred(id);
+    return ret == RWKV_SUCCESS ? finish_deferred(logits) : ret;
+}
+
+int llama_cpp_backend::eval_deferred(int id) {
+    if (!ctx) return RWKV_ERROR_EVAL;
     llama_batch batch = llama_batch_get_one(&id, 1);
-    if (llama_decode(ctx, batch) != 0) {
-        return RWKV_ERROR_EVAL;
-    }
-
-    float * logits_out = llama_get_logits_ith(ctx, -1);
-    int ret = make_logits_tensor_view(logits_out, (size_t) vocab_size, logits);
-    if (ret != RWKV_SUCCESS) {
-        return ret;
-    }
-
-    if (!pending_checkpoint_states.empty()) {
-        pending_checkpoint_states[0] = replayable_state{};
-    }
-
+    if (llama_decode(ctx, batch) != 0) return RWKV_ERROR_EVAL;
+    if (!pending_checkpoint_states.empty()) pending_checkpoint_states[0] = replayable_state{};
     return RWKV_SUCCESS;
+}
+
+int llama_cpp_backend::finish_deferred(Tensor1D & logits) {
+    if (!ctx) return RWKV_ERROR_EVAL;
+    return make_logits_tensor_view(llama_get_logits_ith(ctx, -1), (size_t)vocab_size, logits);
 }
 
 int llama_cpp_backend::eval(std::vector<int> ids, Tensor1D & logits) {
@@ -313,6 +339,8 @@ int llama_cpp_backend::eval(std::vector<int> ids, Tensor1D & logits) {
     if (ids.size() > 1) {
         std::vector<int> prefix(ids.begin(), ids.end() - 1);
         llama_batch prefix_batch = llama_batch_get_one(prefix.data(), prefix.size());
+        std::vector<int8_t> prefix_logits(prefix.size(), 0);
+        prefix_batch.logits = prefix_logits.data();
         if (llama_decode(ctx, prefix_batch) != 0) {
             return RWKV_ERROR_EVAL;
         }

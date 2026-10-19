@@ -322,6 +322,31 @@ void NucleusSampler::update_occurences(int token) {
     _occurences[token] += 1.0f;
 }
 
+bool NucleusSampler::prepare_device_sample(size_t size, DeviceSampleParameters &parameters) {
+    if (!_token_banned.empty() || size <= 1 || _top_k[0] <= 1 || _top_k[0] > 256 ||
+        (size_t)_top_k[0] > size || !std::isfinite(_temperature[0]) ||
+        !std::isfinite(_top_p[0]) || _top_p[0] <= 0.0001f || _top_p[0] > 1.0f) return false;
+    parameters.temperature = _temperature[0];
+    parameters.top_k = _top_k[0];
+    parameters.top_p = _top_p[0];
+    parameters.bias_ids.clear();
+    parameters.biases.clear();
+    if (_presence_penalty[0] > 0 && _frequency_penalty[0] > 0 && _penalty_decay[0] > 0) {
+        for (const auto &[id, count] : _occurences) {
+            if (id < 0 || (size_t)id >= size) continue;
+            const float bias = -(_frequency_penalty[0] * count + _presence_penalty[0]);
+            if (!std::isfinite(bias)) return false;
+            parameters.bias_ids.push_back(id);
+            parameters.biases.push_back(bias);
+        }
+    }
+    // Only the unchanged CPU sampler consumes the real random generator.
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto peek = _generator;
+    parameters.random_draw = static_cast<uint32_t>(peek());
+    return true;
+}
+
 void NucleusSampler::apply_penalties(Tensor1D & logits, const size_t size, std::map<int, float> &occurences, std::vector<int> token_banned, float presence_penalty, float frequency_penalty, float penalty_decay) {
     if (!logits.data_ptr) {
         return;

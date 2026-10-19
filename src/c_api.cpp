@@ -11,12 +11,22 @@
 #include <cstring>
 #include <cstdlib>
 #include <thread>
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#include <pthread/qos.h>
+#endif
 
 #ifdef ENABLE_WEBRWKV
 #include "web_rwkv_ffi.h"
 #endif
 
 namespace rwkvmobile {
+
+static void set_inference_thread_priority() {
+#if defined(__APPLE__) && TARGET_OS_OSX
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
+#endif
+}
 
 extern "C" {
 
@@ -180,6 +190,7 @@ int rwkvmobile_runtime_load_model_with_extra_async(rwkvmobile_runtime_t handle, 
     std::string tokenizer(tokenizer_path);
     rt->start_load_model_async();
     std::thread load_thread([rt, path, backend, tokenizer, extra]() {
+        set_inference_thread_priority();
         int ret = rt->load_model(path, backend, tokenizer, extra);
         int result_code = (ret >= 0) ? RWKV_SUCCESS : ret;
         int model_id = (ret >= 0) ? ret : -1;
@@ -267,7 +278,8 @@ int rwkvmobile_runtime_eval_chat_with_history_async(
     int force_lang,
     int add_generation_prompt
 ) {
-    if (handle == nullptr || inputs == nullptr || num_inputs == 0 || max_tokens <= 0) {
+    // Zero-token chat fills the state cache without sampling.
+    if (handle == nullptr || inputs == nullptr || num_inputs == 0 || max_tokens < 0) {
         return RWKV_ERROR_INVALID_PARAMETERS;
     }
 
@@ -280,6 +292,7 @@ int rwkvmobile_runtime_eval_chat_with_history_async(
     }
 
     std::thread generation_thread([=]() {
+        set_inference_thread_priority();
         int ret = rt->chat(
             model_id,
             inputs_vec,
@@ -311,7 +324,8 @@ int rwkvmobile_runtime_eval_chat_batch_with_history_async(
     const int * force_langs,
     int add_generation_prompt
 ) {
-    if (handle == nullptr || inputs == nullptr || num_inputs == 0 || max_tokens <= 0 || batch_size <= 0) {
+    // The batch runtime also supports a prefill-only request.
+    if (handle == nullptr || inputs == nullptr || num_inputs == 0 || max_tokens < 0 || batch_size <= 0) {
         return RWKV_ERROR_INVALID_PARAMETERS;
     }
 
@@ -331,6 +345,7 @@ int rwkvmobile_runtime_eval_chat_batch_with_history_async(
     }
 
     std::thread generation_thread([=]() {
+        set_inference_thread_priority();
         int ret = rt->chat_batch(
             model_id,
             inputs_vec,
@@ -392,6 +407,7 @@ int rwkvmobile_runtime_gen_completion_async(
     rt->set_is_generating(model_id, true);
     rt->set_stop_signal(model_id, false);
     std::thread generation_thread([=]() {
+        set_inference_thread_priority();
         int ret = rt->gen_completion(
             model_id,
             std::string(prompt),
@@ -455,6 +471,7 @@ int rwkvmobile_runtime_gen_completion_batch_async(
     rt->set_stop_signal(model_id, false);
 
     std::thread generation_thread([=]() {
+        set_inference_thread_priority();
         std::vector<std::string> prompts_vec(batch_size);
         for (int i = 0; i < batch_size; i++) {
             prompts_vec[i] = std::string(prompts[i]);
@@ -904,7 +921,8 @@ struct response_buffer rwkvmobile_runtime_get_response_buffer_content(rwkvmobile
         return buffer;
     }
     auto rt = static_cast<class Runtime *>(runtime);
-    std::string content = rt->get_response_buffer_content(model_id);
+    bool eos_found = false;
+    std::string content = rt->get_response_buffer_content(model_id, &eos_found);
     buffer.length = content.size();
     buffer.content = (char *)malloc((buffer.length + 1) * sizeof(char));
     if (buffer.content == nullptr) {
@@ -912,7 +930,7 @@ struct response_buffer rwkvmobile_runtime_get_response_buffer_content(rwkvmobile
     }
     memset(buffer.content, 0, buffer.length + 1);
     strncpy(buffer.content, content.c_str(), buffer.length);
-    buffer.eos_found = rt->get_response_buffer_eos_found(model_id);
+    buffer.eos_found = eos_found;
     return buffer;
 }
 
@@ -930,7 +948,7 @@ struct batch_tokens_count rwkvmobile_runtime_get_response_buffer_tokens_count_ba
     }
     auto rt = static_cast<class Runtime *>(runtime);
     std::vector<int> counts = rt->get_response_buffer_tokens_count_batch(model_id);
-    static std::vector<int> token_counts_static;
+    static thread_local std::vector<int> token_counts_static;
     token_counts_static = std::move(counts);
 
     struct batch_tokens_count count;
@@ -976,8 +994,8 @@ struct response_buffer_batch rwkvmobile_runtime_get_response_buffer_content_batc
         return buffer;
     }
     auto rt = static_cast<class Runtime *>(runtime);
-    std::vector<std::string> contents = rt->get_response_buffer_content_batch(model_id);
-    auto eos_founds = rt->get_response_buffer_eos_found_batch(model_id);
+    std::vector<bool> eos_founds;
+    std::vector<std::string> contents = rt->get_response_buffer_content_batch(model_id, &eos_founds);
     buffer.batch_size = contents.size();
     buffer.contents = (char **)malloc(contents.size() * sizeof(char *));
     buffer.lengths = (int *)malloc(contents.size() * sizeof(int));
@@ -1074,6 +1092,7 @@ int rwkvmobile_runtime_run_spark_tts_streaming_async(rwkvmobile_runtime_t runtim
         prompt_audio_text_str = std::string(prompt_audio_text);
     }
     std::thread generation_thread([=]() {
+        set_inference_thread_priority();
         int ret = rt->run_spark_tts_zeroshot_streaming(model_id, tts_text, prompt_audio_text_str, prompt_audio_path, output_wav_path);
         return ret;
     });
@@ -1096,6 +1115,7 @@ int rwkvmobile_runtime_run_spark_tts_with_global_tokens_streaming_async(rwkvmobi
     rt->set_stop_signal(model_id, false);
     std::vector<int> global_tokens_vec(global_tokens, global_tokens + 32);
     std::thread generation_thread([=]() {
+        set_inference_thread_priority();
         int ret = rt->run_spark_tts_with_global_tokens_streaming(model_id, tts_text, output_wav_path, global_tokens_vec);
         return ret;
     });
@@ -1117,6 +1137,7 @@ int rwkvmobile_runtime_run_spark_tts_with_properties_streaming_async(rwkvmobile_
     rt->set_is_generating(model_id, true);
     rt->set_stop_signal(model_id, false);
     std::thread generation_thread([=]() {
+        set_inference_thread_priority();
         int ret = rt->run_spark_tts_with_properties_streaming(model_id, tts_text, output_wav_path, age, gender, emotion, pitch, speed);
         return ret;
     });
