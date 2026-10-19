@@ -154,8 +154,8 @@ const std::vector<int> thinking_tag_tokens = {
 };
 
 inline void mask_thinking_tag(Tensor1D &logits) {
-    for (int token : thinking_tag_tokens) {
-        tensor1d_set_f32(logits, token, -1e9f);
+    for (int token_id : thinking_tag_tokens) {
+        tensor1d_set_f32(logits, token_id, -1e9f);
     }
 }
 
@@ -172,8 +172,8 @@ inline void mask_non_chinese_tokens(Tensor1D &logits, int num_vocab) {
 
 inline void mask_chinese_tokens(Tensor1D &logits, int num_vocab) {
     int last_chinese_token = std::min(chinese_tokens_end, num_vocab - 1);
-    for (int token = chinese_tokens_start; token <= last_chinese_token; token++) {
-        tensor1d_set_f32(logits, (size_t)token, -1e9f);
+    for (int token_id = chinese_tokens_start; token_id <= last_chinese_token; token_id++) {
+        tensor1d_set_f32(logits, (size_t)token_id, -1e9f);
     }
 }
 
