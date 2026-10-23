@@ -16,6 +16,7 @@
 #include "IBufferAlloc.hpp"
 #include "IOTensor.hpp"
 #include "QnnTypeMacros.hpp"
+#include "QnnWrapperUtils.hpp"
 #include "RpcMem.hpp"
 #include "logger.h"
 #ifdef _WIN32
@@ -363,15 +364,13 @@ bool IOTensor::tearDownTensors(Qnn_Tensor_t* tensors, uint32_t tensorCount) {
     rwkvmobile::LOGD("cleaning up resources for tensors");
     for (size_t tensorIdx = 0; tensorIdx < tensorCount; tensorIdx++) {
       // LOGD("freeing resources for tensor: %zu", tensorIdx);
-      if (nullptr != QNN_TENSOR_GET_DIMENSIONS(&tensors[tensorIdx])) {
-        // LOGD("freeing maxDimensions");
-        free(QNN_TENSOR_GET_DIMENSIONS(&tensors[tensorIdx]));
-      }
+
       if (m_bufferAlloc == BufferAlloc::SHARED_BUFFER) {
         m_bufferManager->deregisterTensorFusedBuffer(&(tensors[tensorIdx]));
       } else {
         m_bufferManager->freeTensorBuffer(&(tensors[tensorIdx]));
       }
+      freeQnnTensor(tensors[tensorIdx]);
       m_freeTensorsPointerSet.insert(&(tensors[tensorIdx]));
     }
     free(tensors);

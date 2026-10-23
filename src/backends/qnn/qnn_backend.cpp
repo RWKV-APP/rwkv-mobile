@@ -48,8 +48,14 @@ namespace rwkvmobile {
 
 using namespace qnn::tools;
 
-// global qnn backend context pointer
+static std::mutex qnnSessionMutex;
 std::shared_ptr<qnn_backend_context> g_qnn_backend_context_ptr = nullptr;
+
+static void releaseQnnSessionAtExit() {
+    std::lock_guard<std::mutex> sessionLock(qnnSessionMutex);
+    if (g_qnn_backend_context_ptr && g_qnn_backend_context_ptr->ref_count == 0)
+        g_qnn_backend_context_ptr.reset();
+}
 
 static std::atomic<int> qnnLogLevelCache{-1};
 static std::atomic<int> forceCrossContextCopyCache{-1};
@@ -620,6 +626,7 @@ int qnn_backend_context::qnn_register_op_package(std::string package_path, std::
 }
 
 int qnn_backend_context::qnn_create_power_config_id() {
+    if (powerConfigActive) return RWKV_SUCCESS;
     QnnDevice_Infrastructure_t deviceInfra = nullptr;
     Qnn_ErrorHandle_t devErr = qnnFunctionPointers.qnnInterface.deviceGetInfrastructure(&deviceInfra);
     if (devErr != QNN_SUCCESS) {
@@ -633,10 +640,12 @@ int qnn_backend_context::qnn_create_power_config_id() {
       LOGE("createPowerConfigId failed");
       return RWKV_ERROR_BACKEND | RWKV_ERROR_INIT;
     }
+    powerConfigActive = true;
     return RWKV_SUCCESS;
 }
 
 int qnn_backend_context::qnn_destory_power_config_id() {
+    if (!powerConfigActive) return RWKV_SUCCESS;
     QnnDevice_Infrastructure_t deviceInfra = nullptr;
     Qnn_ErrorHandle_t devErr = qnnFunctionPointers.qnnInterface.deviceGetInfrastructure(&deviceInfra);
     if (devErr != QNN_SUCCESS) {
@@ -651,6 +660,7 @@ int qnn_backend_context::qnn_destory_power_config_id() {
         LOGE("destroyPowerConfigId failed");
         return RWKV_ERROR_BACKEND | RWKV_ERROR_RELEASE;
     }
+    powerConfigActive = false;
     return RWKV_SUCCESS;
 }
 
@@ -752,6 +762,8 @@ int qnn_backend_context::qnn_set_rpc_latency_and_polling() {
 }
 
 int qnn_backend::init(void * extra) {
+    std::lock_guard<std::mutex> sessionLock(qnnSessionMutex);
+    if (contextAcquired) return RWKV_SUCCESS;
     LOGI("QNN_SDK_BUILD_ID: %s", QNN_SDK_BUILD_ID);
     std::string path;
     if (extra != nullptr) {
@@ -787,9 +799,16 @@ int qnn_backend::init(void * extra) {
     }
 #endif
 
+    if (g_qnn_backend_context_ptr && g_qnn_backend_context_ptr->qnnBackendPath != path) {
+        if (g_qnn_backend_context_ptr->ref_count != 0) return RWKV_ERROR_BACKEND | RWKV_ERROR_INIT;
+        g_qnn_backend_context_ptr.reset();
+    }
     if (g_qnn_backend_context_ptr == nullptr) {
         try {
-            g_qnn_backend_context_ptr = std::make_shared<qnn_backend_context>(path);
+            auto session = std::make_shared<qnn_backend_context>(path);
+            // Register after SDK initialization so cleanup precedes vendor static destructors.
+            if (std::atexit(releaseQnnSessionAtExit) != 0) return RWKV_ERROR_BACKEND | RWKV_ERROR_INIT;
+            g_qnn_backend_context_ptr = std::move(session);
         } catch (const std::exception& e) {
             LOGE("Error creating QNN backend context: %s", e.what());
             g_qnn_backend_context_ptr = nullptr;
@@ -798,7 +817,17 @@ int qnn_backend::init(void * extra) {
     }
     {
         std::lock_guard<std::mutex> lock(g_qnn_backend_context_ptr->qnnMutex);
+        auto& session = *g_qnn_backend_context_ptr;
+        if (session.ref_count == 0 && !session.powerConfigActive) {
+            if (session.qnn_create_power_config_id() != RWKV_SUCCESS ||
+                session.qnn_set_rpc_latency_and_polling() != RWKV_SUCCESS ||
+                session.qnn_set_power_config() != RWKV_SUCCESS) {
+                session.qnn_destory_power_config_id();
+                return RWKV_ERROR_BACKEND | RWKV_ERROR_INIT;
+            }
+        }
         g_qnn_backend_context_ptr->ref_count++;
+        contextAcquired = true;
         LOGI("[QNN] qnn_backend ref_count: %d", g_qnn_backend_context_ptr->ref_count);
     }
 
@@ -1240,6 +1269,16 @@ int qnn_backend::load_model(std::string model_path, void * extra) {
                         batch_decode_gidx[parsedBsz]++;
                     }
                 }
+            }
+            // Tensor metadata ownership moved into the per-kind graph arrays.
+            for (int i = 0; i < n_chunks; ++i) {
+                for (uint32_t j = 0; j < graphCounts[i]; ++j) {
+                    graphInfos[i][j]->inputTensors = nullptr;
+                    graphInfos[i][j]->numInputTensors = 0;
+                    graphInfos[i][j]->outputTensors = nullptr;
+                    graphInfos[i][j]->numOutputTensors = 0;
+                }
+                freeGraphsInfo(&graphInfos[i], graphCounts[i]);
             }
         }
     } else {
@@ -3009,6 +3048,7 @@ int qnn_backend::eval(int id, Tensor1D & logits) {
 }
 
 int qnn_backend::eval(std::vector<int> ids, Tensor1D & logits) {
+    if (!isTensorInitialized) return RWKV_ERROR_EVAL;
     if (ids.empty()) {
         return RWKV_ERROR_EVAL;
     }
@@ -3159,6 +3199,7 @@ int qnn_backend::eval(std::vector<int> ids, Tensor1D & logits) {
 }
 
 int qnn_backend::eval_with_embeddings(const float *embeddings, int n_tokens, Tensor1D & logits) {
+    if (!isTensorInitialized) return RWKV_ERROR_EVAL;
     {
         std::lock_guard<std::mutex> lock(g_qnn_backend_context_ptr->qnnMutex);
         if (!isTensorInitialized) return RWKV_ERROR_EVAL;
@@ -3194,6 +3235,7 @@ int qnn_backend::eval_with_embeddings(const float *embeddings, int n_tokens, Ten
 }
 
 int qnn_backend::eval_batch(std::vector<std::vector<int>> ids, Tensor1D & logits) {
+    if (!isTensorInitialized) return RWKV_ERROR_EVAL;
     if (supported_batch_sizes.size() == 0) {
         return RWKV_ERROR_UNSUPPORTED;
     }
@@ -3290,6 +3332,7 @@ int qnn_backend::free_state(std::any state) {
 }
 
 int qnn_backend::get_state_on_batch_slot(int slot, std::any &state) {
+    if (!isTensorInitialized) return RWKV_ERROR_EVAL;
     int max_supported_bsz = 1;
     if (!supported_batch_sizes.empty()) {
         int max_supported_bsz_index = std::max_element(supported_batch_sizes.begin(), supported_batch_sizes.end()) - supported_batch_sizes.begin();
@@ -3316,6 +3359,7 @@ int qnn_backend::get_state_on_batch_slot(int slot, std::any &state) {
 }
 
 int qnn_backend::set_state_on_batch_slot(int slot, std::any state) {
+    if (!isTensorInitialized) return RWKV_ERROR_EVAL;
     if (!state.has_value()) return RWKV_SUCCESS;
     int max_supported_bsz = 1;
     if (!supported_batch_sizes.empty()) {
@@ -3342,6 +3386,7 @@ int qnn_backend::set_state_on_batch_slot(int slot, std::any state) {
 }
 
 int qnn_backend::zero_state_on_batch_slot(int slot) {
+    if (!isTensorInitialized) return RWKV_ERROR_EVAL;
     int max_supported_bsz = 1;
     if (!supported_batch_sizes.empty()) {
         int max_supported_bsz_index = std::max_element(supported_batch_sizes.begin(), supported_batch_sizes.end()) - supported_batch_sizes.begin();
@@ -3478,6 +3523,7 @@ int qnn_backend::zero_state_on_batch_slot(int slot) {
 }
 
 int qnn_backend::load_raw_states(std::vector<std::vector<half_float::half>> states) {
+    if (!isTensorInitialized) return RWKV_ERROR_EVAL;
     zero_state();
     if (states.size() != n_layers) {
         LOGE("%s: The state size is not equal to the number of layers, expected %d, got %d", __func__, n_layers, states.size());
@@ -3533,6 +3579,7 @@ int qnn_backend::deserialize_runtime_state(std::vector<uint8_t> &data, std::any 
 
 int qnn_backend::release_model() {
     LOGI("[QNN] release_model");
+    isTensorInitialized = false;
     // free graphs
 
     if (!reRegisteredSharedInputMemHandles.empty() &&
@@ -3578,25 +3625,50 @@ int qnn_backend::release_model() {
         qnnEmbdGraphsInfo = nullptr;
     }
 
+    if (qnnEmbdPrefillGraphsInfo) {
+        for (uint32_t i = 0; i < qnnEmbdPrefillGraphsCount; ++i) {
+            auto& graph = *qnnEmbdPrefillGraphsInfo[i];
+            qnnIOTensorUtils->tearDownTensors(inputTensorsEmbdPrefill[i], graph.numInputTensors);
+            qnnIOTensorUtils->tearDownTensors(outputTensorsEmbdPrefill[i], graph.numOutputTensors);
+            inputTensorsEmbdPrefill[i] = outputTensorsEmbdPrefill[i] = nullptr;
+        }
+        freeGraphsInfo(&qnnEmbdPrefillGraphsInfo, qnnEmbdPrefillGraphsCount);
+    }
+    qnnEmbdPrefillGraphsCount = 0;
     cleanup_batch_graphs();
 
-    for (int i = 0; i < qnnContextHandles.size(); i++) {
+    qnnPrefillGraphsCount = qnnEmbdGraphsCount = 0;
+    int releaseStatus = RWKV_SUCCESS;
+    for (auto& context : qnnContextHandles) {
+        if (!context) continue;
         if (QNN_CONTEXT_NO_ERROR !=
-            g_qnn_backend_context_ptr->qnnFunctionPointers.qnnInterface.contextFree(qnnContextHandles[i], nullptr)) {
-            LOGE("Could not free context");
+            g_qnn_backend_context_ptr->qnnFunctionPointers.qnnInterface.contextFree(context, nullptr)) {
+            LOGE("Could not free context; retaining model buffer owners for retry");
+            releaseStatus = RWKV_ERROR_BACKEND | RWKV_ERROR_RELEASE;
+        } else {
+            context = nullptr;
         }
     }
+    if (releaseStatus != RWKV_SUCCESS) return releaseStatus;
     qnnContextHandles.clear();
-
-    for (int i = 0; i < graphConfigsInfoCount; i++) {
+    for (uint32_t i = 0; i < graphConfigsInfoCount; i++) {
+        delete[] graphConfigsInfo[i]->graphConfigs;
         delete graphConfigsInfo[i];
     }
-    delete graphConfigsInfo;
+    delete[] graphConfigsInfo;
+    graphConfigsInfo = nullptr;
+    graphConfigsInfoCount = 0;
 
     delete qnnIOTensorUtils;
+    qnnIOTensorUtils = nullptr;
+    external_embeddings.reset();
+    external_deep_embeddings.reset();
+    delete rmpack;
+    rmpack = nullptr;
 
     if (qnnModelHandle)
         pal::dynamicloading::dlClose(qnnModelHandle);
+    qnnModelHandle = nullptr;
 
     tokenInputTensorBatchDecode.clear();
     deepEmbeddingTensors.clear();
@@ -3608,7 +3680,14 @@ int qnn_backend::release_model() {
 void qnn_backend::cleanup_batch_graphs() {
     for (auto& [batchSize, count] : qnnBatchDecodeGraphsCount) {
         if (qnnBatchDecodeGraphsInfo[batchSize] != nullptr) {
-            free(qnnBatchDecodeGraphsInfo[batchSize]);
+            for (uint32_t i = 0; i < count; ++i) {
+                auto& graph = *qnnBatchDecodeGraphsInfo[batchSize][i];
+                if (inputTensorsBatchDecode[batchSize])
+                    qnnIOTensorUtils->tearDownTensors(inputTensorsBatchDecode[batchSize][i], graph.numInputTensors);
+                if (outputTensorsBatchDecode[batchSize])
+                    qnnIOTensorUtils->tearDownTensors(outputTensorsBatchDecode[batchSize][i], graph.numOutputTensors);
+            }
+            freeGraphsInfo(&qnnBatchDecodeGraphsInfo[batchSize], count);
             qnnBatchDecodeGraphsInfo[batchSize] = nullptr;
         }
         if (inputTensorsBatchDecode[batchSize] != nullptr) {
@@ -3629,6 +3708,9 @@ void qnn_backend::cleanup_batch_graphs() {
 }
 
 int qnn_backend::release() {
+    std::lock_guard<std::mutex> sessionLock(qnnSessionMutex);
+    if (!contextAcquired) return RWKV_SUCCESS;
+    contextAcquired = false;
     if (g_qnn_backend_context_ptr == nullptr) {
         LOGW("[QNN] qnn_backend::release: qnn_backend context is already null");
         return RWKV_SUCCESS;
@@ -3640,10 +3722,13 @@ int qnn_backend::release() {
     }
 
     if (g_qnn_backend_context_ptr->ref_count == 0) {
-        g_qnn_backend_context_ptr.reset();
-        LOGI("[QNN] qnn_backend::release: qnn_backend context reset");
+        // Reusing the SDK session bounds its custom-op descriptors across model switches.
+        const int status = g_qnn_backend_context_ptr->qnn_destory_power_config_id();
+        LOGI("[QNN] idle session retained; power vote release status: %d", status);
+        return status;
     }
     return RWKV_SUCCESS;
 }
+
 
 } // namespace rwkvmobile

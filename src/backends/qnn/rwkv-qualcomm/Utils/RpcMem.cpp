@@ -58,11 +58,10 @@ bool RpcMem::initialize() {
 }
 
 RpcMem::~RpcMem() {
-  // TODO: Fix libcdsprpc.so handle closing order issue
-  // if (m_libCdspRpc) {
-  //   rwkvmobile::LOGI("Closing libcdsprpc.so handle");
-  //   dlclose(m_libCdspRpc);
-  // }
+  // Contexts must be freed before their ordinary allocation owner is destroyed.
+  for (void* buffer : m_ownedBuffers) m_rpcMemFree(buffer);
+  m_ownedBuffers.clear();
+  if (m_libCdspRpc) dlclose(m_libCdspRpc);
 }
 
 RpcMemTensorData* RpcMem::getRpcMemTensorData(Qnn_Tensor_t* tensor) {
@@ -138,6 +137,7 @@ bool RpcMem::allocateTensorBufferForContext(
   }
 
   auto memPointer = m_rpcMemAlloc(RPCMEM_HEAP_ID_SYSTEM, RPCMEM_DEFAULT_FLAGS, tensorDataSize);
+  if (memPointer) m_ownedBuffers.insert(memPointer);
   auto status     = true;
   if (!memPointer) {
     rwkvmobile::LOGE("rpcmem_alloc failure");
@@ -170,13 +170,13 @@ bool RpcMem::allocateTensorBufferForContext(
     }
     QNN_TENSOR_SET_MEM_HANDLE(tensor, memHandle);
     rwkvmobile::LOGD("RpcMem :: allocateTensorBuffer %s mem_handle=%p", QNN_TENSOR_GET_NAME(tensor), memHandle);
-    m_memHandleToRpcMem.insert({memHandle, RpcMemTensorData(memfd, memPointer, tensorDataSize)});
+    if (status) m_memHandleToRpcMem.insert({memHandle, RpcMemTensorData(memfd, memPointer, tensorDataSize)});
   }
   if (status == true) {
     m_tensorToRpcMem.insert({tensor, RpcMemTensorData(memfd, memPointer, tensorDataSize)});
   }
   if (status == false) {
-    if (m_rpcMemFree) {
+    if (m_rpcMemFree && m_ownedBuffers.erase(memPointer)) {
       m_rpcMemFree(memPointer);
     }
   }
@@ -206,7 +206,7 @@ bool RpcMem::freeTensorBuffer(Qnn_Tensor_t* tensor) {
       rwkvmobile::LOGE("Tensor not found");
       return false;
     }
-    if (m_rpcMemFree) {
+    if (m_rpcMemFree && m_ownedBuffers.erase(m_tensorToRpcMem[tensor].memPointer)) {
       m_rpcMemFree(m_tensorToRpcMem[tensor].memPointer);
     }
     m_tensorToRpcMem.erase(tensor);
@@ -469,4 +469,5 @@ void RpcMem::freeFusedBuffers() {
     rwkvmobile::LOGD("Freeing fused buffer %p (size=%lu)", mem_ptr, buffer_size);
     m_rpcMemFree(mem_ptr);
   }
+  m_fusedBuffers.clear();
 }

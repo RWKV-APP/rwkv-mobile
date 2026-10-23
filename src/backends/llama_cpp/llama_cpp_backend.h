@@ -53,6 +53,7 @@ private:
     };
 
     void initialize_supported_batch_sizes();
+    int decode(llama_batch batch);
     int get_state_bytes_for_slot(int slot, std::vector<uint8_t> &state_bytes);
     int set_state_bytes_for_slot(int slot, const std::vector<uint8_t> &state_bytes);
     int restore_replayable_state_on_slot(int slot, const replayable_state &state_data);
@@ -61,6 +62,9 @@ private:
     llama_model * model = nullptr;
     llama_context * ctx = nullptr;
     ggml_threadpool_t threadpool = nullptr;
+#if defined(__ANDROID__)
+    std::vector<int> automatic_cpu_mask;
+#endif
     std::vector<replayable_state> pending_checkpoint_states;
     llama_batch batch_decode = {};
     bool batch_decode_initialized = false;

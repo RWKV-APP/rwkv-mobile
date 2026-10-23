@@ -64,6 +64,7 @@ add_executable(test_generate_topk test_generate_topk.cpp ../src/c_api.cpp)
 target_link_libraries(test_generate_topk PUBLIC rwkv_mobile_internal)
 
 if (ENABLE_LLAMACPP_BACKEND)
+    add_executable(test_cpu_thread_policy test_cpu_thread_policy.cpp)
     add_executable(test_embedding test_embedding.cpp ../src/c_api.cpp)
     target_link_libraries(test_embedding PUBLIC rwkv_mobile_internal)
 endif()
@@ -127,4 +128,23 @@ target_link_libraries(test_multiple_models PUBLIC rwkv_mobile_internal)
 if (ENABLE_SERVER)
     add_executable(rwkv_server rwkv_server.cpp ../src/c_api.cpp)
     target_link_libraries(rwkv_server PUBLIC rwkv_mobile_internal)
+endif()
+
+if (ANDROID AND ANDROID_ABI STREQUAL "arm64-v8a" AND ENABLE_LLAMACPP_BACKEND)
+    add_executable(test_android_cpu_fpcr test_android_cpu_fpcr.cpp)
+    target_include_directories(test_android_cpu_fpcr PRIVATE ../src)
+    target_link_libraries(test_android_cpu_fpcr PRIVATE rwkv_mobile)
+endif()
+
+if (ANDROID AND ENABLE_QNN_BACKEND)
+    add_executable(test_qnn_runtime_lifecycle test_qnn_runtime_lifecycle.cpp)
+    target_include_directories(test_qnn_runtime_lifecycle PRIVATE
+        ../src ../src/backends/qnn ../src/backends/qnn/rwkv-qualcomm
+        ../src/backends/qnn/rwkv-qualcomm/Utils
+        ../src/backends/qnn/rwkv-qualcomm/WrapperUtils
+        ../src/backends/qnn/rwkv-qualcomm/QNN)
+    target_link_libraries(test_qnn_runtime_lifecycle PRIVATE rwkv_mobile)
+    add_executable(test_qnn_runtime_cycles test_qnn_runtime_cycles.cpp)
+    target_include_directories(test_qnn_runtime_cycles PRIVATE ../src)
+    target_link_libraries(test_qnn_runtime_cycles PRIVATE rwkv_mobile)
 endif()

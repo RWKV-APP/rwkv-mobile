@@ -11,6 +11,9 @@
 #if defined(__ANDROID__) || defined(__OHOS__)
 #include <unistd.h>
 #endif
+#if defined(__ANDROID__)
+#include <sched.h>
+#endif
 #if defined(__OHOS__)
 #include <hilog/log.h>
 #endif
@@ -29,6 +32,45 @@ namespace rwkvmobile {
 
 static constexpr uint32_t kReplayableStateMagic = 0x5350524c; // "LRPS"
 static constexpr uint32_t kReplayableStateVersion = 1;
+
+#if defined(__ANDROID__)
+static std::vector<int> android_performance_cpu_mask() {
+    cpu_set_t allowed = {};
+    if (sched_getaffinity(0, sizeof(allowed), &allowed) != 0) return {};
+    std::vector<std::pair<int, unsigned int>> capacities;
+    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+        if (!CPU_ISSET(cpu, &allowed)) continue;
+        if (cpu >= GGML_MAX_N_THREADS) return {};
+        unsigned int capacity = 0;
+        std::ifstream input("/sys/devices/system/cpu/cpu" + std::to_string(cpu) + "/cpu_capacity");
+        if (!(input >> capacity) || capacity == 0 || capacity > 1048576) return {};
+        capacities.emplace_back(cpu, capacity);
+    }
+    return android_llama_performance_cpus(capacities);
+}
+
+class ScopedAndroidCpuAffinity {
+    cpu_set_t original = {};
+    bool changed = false;
+public:
+    explicit ScopedAndroidCpuAffinity(const std::vector<int> & cpus) {
+        if (cpus.empty() || sched_getaffinity(0, sizeof(original), &original) != 0) return;
+        cpu_set_t selected = {};
+        bool any = false;
+        for (int cpu : cpus) {
+            if (CPU_ISSET(cpu, &original)) { CPU_SET(cpu, &selected); any = true; }
+        }
+        if (any && std::memcmp(&selected, &original, sizeof(selected)) != 0) {
+            changed = sched_setaffinity(0, sizeof(selected), &selected) == 0;
+        }
+    }
+    ~ScopedAndroidCpuAffinity() {
+        if (changed && sched_setaffinity(0, sizeof(original), &original) != 0) {
+            LOGW("Could not restore Android decode caller affinity: %s", std::strerror(errno));
+        }
+    }
+};
+#endif
 
 #if defined(__ANDROID__) || defined(__OHOS__)
 static bool configure_threadpool_cpuset(
@@ -79,6 +121,13 @@ static int make_logits_tensor_view(float * logits_out, size_t count, Tensor1D &l
     }
     logits = Tensor1D::make(logits_out, TensorDType::F32, count);
     return RWKV_SUCCESS;
+}
+
+int llama_cpp_backend::decode(llama_batch batch) {
+#if defined(__ANDROID__)
+    ScopedAndroidCpuAffinity restore_affinity(automatic_cpu_mask);
+#endif
+    return llama_decode(ctx, batch);
 }
 
 void llama_cpp_backend::initialize_supported_batch_sizes() {
@@ -161,6 +210,17 @@ int llama_cpp_backend::load_model(std::string model_path, void * extra) {
     }
 
     llama_context_params ctx_params = llama_context_default_params();
+#if defined(__ANDROID__)
+    automatic_cpu_mask.clear();
+    if ((model_params.n_gpu_layers == 0 || model->devices.empty()) && model->arch == LLM_ARCH_RWKV7 &&
+        !std::getenv("RWKV_LLAMACPP_THREADS") && !std::getenv("RWKV_LLAMACPP_CPUSET")) {
+        automatic_cpu_mask = android_performance_cpu_mask();
+        if (!automatic_cpu_mask.empty()) {
+            ctx_params.n_threads = ctx_params.n_threads_batch = android_llama_cpu_threads(automatic_cpu_mask.size(), getuid());
+        }
+    }
+    ScopedAndroidCpuAffinity restore_affinity(automatic_cpu_mask);
+#endif
     const uint32_t n_ctx_train = std::max<uint32_t>(1u, (uint32_t) llama_model_n_ctx_train(model));
     // RWKV mobile models can advertise very large metadata contexts; keep the
     // per-sequence working window aligned with the common 8k runtime target.
@@ -176,7 +236,7 @@ int llama_cpp_backend::load_model(std::string model_path, void * extra) {
     }
 #endif
 #if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__) && !defined(__OHOS__))
-    if (model_params.n_gpu_layers == 0) {
+    if (desktop_llama_cpu_only(model_params.n_gpu_layers, !model->devices.empty())) {
         const unsigned int available = std::max(1u, std::thread::hardware_concurrency());
 #if defined(__x86_64__) || defined(_M_X64)
         ctx_params.n_threads = ctx_params.n_threads_batch = desktop_llama_cpu_threads(available);
@@ -193,7 +253,7 @@ int llama_cpp_backend::load_model(std::string model_path, void * extra) {
             ctx_params.n_threads = ctx_params.n_threads_batch = static_cast<int>(requested);
         }
     }
-#if defined(__ANDROID__) || defined(__OHOS__)
+#if defined(_WIN32) || defined(__ANDROID__) || defined(__OHOS__)
     if (const char * value = std::getenv("RWKV_LLAMACPP_UBATCH")) {
         errno = 0;
         char * end = nullptr;
@@ -206,8 +266,8 @@ int llama_cpp_backend::load_model(std::string model_path, void * extra) {
         }
     }
 #endif
-#if defined(__linux__) && !defined(__ANDROID__) && !defined(__OHOS__)
-    // Explicit Linux CPU profiles must reach the actual context, not only the environment.
+#if defined(_WIN32) || (defined(__APPLE__) && TARGET_OS_OSX) || (defined(__linux__) && !defined(__ANDROID__) && !defined(__OHOS__))
+    // Explicit desktop CPU profiles must reach the actual context, not only the environment.
     auto requested_threads = [](const char *name, int fallback) {
         const char *value = std::getenv(name);
         if (!value || !*value) return fallback;
@@ -225,7 +285,7 @@ int llama_cpp_backend::load_model(std::string model_path, void * extra) {
 #endif
     ctx = llama_init_from_model(model, ctx_params);
 #if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__) && !defined(__OHOS__))
-    if (model_params.n_gpu_layers == 0) {
+    if (desktop_llama_cpu_only(model_params.n_gpu_layers, !model->devices.empty())) {
         LOGI("llama.cpp CPU threads: %d", ctx_params.n_threads);
     }
 #endif
@@ -252,6 +312,9 @@ int llama_cpp_backend::load_model(std::string model_path, void * extra) {
 #if defined(__ANDROID__) || defined(__OHOS__)
     const long online_cpus = sysconf(_SC_NPROCESSORS_ONLN);
     int n_threads = online_cpus > 0 ? (int) online_cpus : (int) std::thread::hardware_concurrency();
+#if defined(__ANDROID__)
+    if (!automatic_cpu_mask.empty()) n_threads = android_llama_cpu_threads(automatic_cpu_mask.size(), getuid());
+#endif
     if (const char *value = std::getenv("RWKV_LLAMACPP_THREADS")) {
         const int requested = std::atoi(value);
         if (requested > 0) {
@@ -261,6 +324,19 @@ int llama_cpp_backend::load_model(std::string model_path, void * extra) {
     if (n_threads > 0) {
         llama_set_n_threads(ctx, n_threads, n_threads);
         ggml_threadpool_params threadpool_params = ggml_threadpool_params_default(n_threads);
+#if defined(__ANDROID__)
+        if (!automatic_cpu_mask.empty()) {
+            std::string cpu_list;
+            for (int cpu : automatic_cpu_mask) {
+                threadpool_params.cpumask[cpu] = true;
+                if (!cpu_list.empty()) cpu_list += ',';
+                cpu_list += std::to_string(cpu);
+            }
+            // Callers can change between load and decode; allow the workers to share this set.
+            threadpool_params.strict_cpu = false;
+            LOGI("Android RWKV7 CPU capacity mask: %s; threads: %d", cpu_list.c_str(), n_threads);
+        }
+#endif
         if (const char *cpu_set = std::getenv("RWKV_LLAMACPP_CPUSET")) {
             if (configure_threadpool_cpuset(threadpool_params, n_threads, cpu_set)) {
                 LOGI("strict threadpool CPU set: %s", cpu_set);
@@ -321,7 +397,7 @@ int llama_cpp_backend::eval(int id, Tensor1D & logits) {
 int llama_cpp_backend::eval_deferred(int id) {
     if (!ctx) return RWKV_ERROR_EVAL;
     llama_batch batch = llama_batch_get_one(&id, 1);
-    if (llama_decode(ctx, batch) != 0) return RWKV_ERROR_EVAL;
+    if (decode(batch) != 0) return RWKV_ERROR_EVAL;
     if (!pending_checkpoint_states.empty()) pending_checkpoint_states[0] = replayable_state{};
     return RWKV_SUCCESS;
 }
@@ -341,7 +417,7 @@ int llama_cpp_backend::eval(std::vector<int> ids, Tensor1D & logits) {
         llama_batch prefix_batch = llama_batch_get_one(prefix.data(), prefix.size());
         std::vector<int8_t> prefix_logits(prefix.size(), 0);
         prefix_batch.logits = prefix_logits.data();
-        if (llama_decode(ctx, prefix_batch) != 0) {
+        if (decode(prefix_batch) != 0) {
             return RWKV_ERROR_EVAL;
         }
     }
@@ -393,7 +469,7 @@ int llama_cpp_backend::eval_batch_tokens(const std::vector<int> &ids, Tensor1D &
         batch_decode.n_tokens++;
     }
 
-    if (llama_decode(ctx, batch_decode) != 0) {
+    if (decode(batch_decode) != 0) {
         return RWKV_ERROR_EVAL;
     }
 
@@ -417,7 +493,7 @@ int llama_cpp_backend::eval_with_embeddings(const float *embeddings, int n_token
         /*seq_id         =*/ nullptr,
         /*logits         =*/ nullptr,
     };
-    if (llama_decode(ctx, batch) != 0) {
+    if (decode(batch) != 0) {
         return RWKV_ERROR_EVAL;
     }
     float * logits_out = llama_get_logits_ith(ctx, -1);
@@ -504,7 +580,7 @@ int llama_cpp_backend::restore_replayable_state_on_slot(int slot, const replayab
         /*logits         =*/ &logits_flag,
     };
 
-    if (llama_decode(ctx, replay_batch) != 0) {
+    if (decode(replay_batch) != 0) {
         return RWKV_ERROR_EVAL;
     }
 

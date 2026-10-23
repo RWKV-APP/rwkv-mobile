@@ -14,6 +14,7 @@
 #include <thread>
 #ifdef __ANDROID__
 #include <sys/system_properties.h>
+#include <dirent.h>
 #endif
 #include "rmpack.h"
 #include "pth_loader.h"
@@ -624,7 +625,25 @@ int Runtime::release_model(int model_id) {
     if (_models.find(model_id) == _models.end()) {
         return RWKV_ERROR_RUNTIME | RWKV_ERROR_INVALID_PARAMETERS;
     }
+#ifdef ENABLE_QNN
+    auto& model = _models.at(model_id);
+    if (model->backend_name == "qnn") {
+        const int status = model->backend->release_model();
+        if (status != RWKV_SUCCESS) return status;
+    }
+#endif
     _models.erase(model_id);
+#ifdef __ANDROID__
+    long open_fds = -1;
+    if (DIR * directory = opendir("/proc/self/fd")) {
+        // Exclude the directory descriptor opened for this transition-only count.
+        while (const dirent * entry = readdir(directory)) {
+            if (entry->d_name[0] >= '0' && entry->d_name[0] <= '9') ++open_fds;
+        }
+        closedir(directory);
+    }
+    LOGI("Model %d released; process open FD count: %ld", model_id, open_fds);
+#endif
     return RWKV_SUCCESS;
 }
 
@@ -4306,7 +4325,10 @@ void Runtime::backend_set_extra_str(int model_id, std::string str) {
 }
 
 int Runtime::release() {
-    _models.clear();
+    while (!_models.empty()) {
+        const int status = release_model(_models.begin()->first);
+        if (status != RWKV_SUCCESS) return status;
+    }
 #ifdef ENABLE_LLAMACPP
     if (_embedding) {
         _embedding->release();

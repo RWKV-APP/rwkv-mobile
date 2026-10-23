@@ -95,6 +95,7 @@ int rwkvmobile_runtime_release(rwkvmobile_runtime_t handle) {
     }
     auto rt = static_cast<class Runtime *>(handle);
     int ret = rt->release();
+    if (ret != RWKV_SUCCESS) return ret;
     delete rt;
     return ret;
 }
@@ -587,16 +588,12 @@ int rwkvmobile_runtime_get_available_backend_names(char * backend_names_buffer, 
     if (backend_names_buffer == nullptr || buffer_size <= 0) {
         return RWKV_ERROR_INVALID_PARAMETERS;
     }
-    Runtime * rt = new Runtime();
-    if (rt == nullptr) {
-        return RWKV_ERROR_ALLOC;
-    }
-    auto backend_names = rt->get_available_backends_str();
+    Runtime rt;
+    auto backend_names = rt.get_available_backends_str();
     if (backend_names.size() >= buffer_size) {
         return RWKV_ERROR_ALLOC;
     }
     strncpy(backend_names_buffer, backend_names.c_str(), buffer_size);
-    delete rt;
     return RWKV_SUCCESS;
 }
 

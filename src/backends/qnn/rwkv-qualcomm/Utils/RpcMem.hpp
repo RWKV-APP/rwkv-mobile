@@ -101,6 +101,7 @@ class RpcMem final : public IBufferAlloc {
 
   std::unordered_map<Qnn_Tensor_t*, RpcMemTensorData> m_tensorToRpcMem;
   std::unordered_set<Qnn_Tensor_t*> m_sameMemoryFreeTensors;
+  std::unordered_set<void*> m_ownedBuffers;
   std::vector<std::pair<void*, size_t>> m_fusedBuffers;  // vector<<memPointer, bufferSize>>
   std::vector<int32_t> m_fusedFds;
   std::unordered_set<Qnn_MemHandle_t> m_orphanedMemHandles;

@@ -28,6 +28,7 @@ public:
     int qnn_register_op_package(std::string package_path, std::string interface_provider);
     int qnn_set_rpc_latency_and_polling();
 
+    bool powerConfigActive = false;
     uint32_t powerConfigId = 0;
     uint32_t deviceId = 0;
     uint32_t coreId = 0;
@@ -49,8 +50,7 @@ public:
 class qnn_backend : public execution_provider {
 public:
     ~qnn_backend() {
-        release_model();
-        release();
+        if (release_model() == RWKV_SUCCESS) release();
     }
 
     int init(void * extra) override;
@@ -103,6 +103,7 @@ private:
     double decode_speed = -1;
     void *qnnModelHandle = nullptr;
 
+    bool contextAcquired = false;
     bool isTensorInitialized = false;
 
     int prefillSequenceLength = 0;

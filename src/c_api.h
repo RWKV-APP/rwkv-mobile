@@ -129,6 +129,7 @@ int rwkvmobile_runtime_get_available_backend_names(char * backend_names_buffer, 
 
 rwkvmobile_runtime_t rwkvmobile_runtime_init();
 
+// A backend release error leaves the handle valid for a release retry.
 int rwkvmobile_runtime_release(rwkvmobile_runtime_t runtime);
 
 struct rwkvmobile_server_config rwkvmobile_server_config_default();
@@ -155,6 +156,7 @@ void rwkvmobile_runtime_get_load_model_status(rwkvmobile_runtime_t runtime, int 
 
 float rwkvmobile_runtime_get_load_model_progress(rwkvmobile_runtime_t runtime);
 
+// A QNN release error retains the model only for release retry, not inference.
 int rwkvmobile_runtime_release_model(rwkvmobile_runtime_t runtime, int model_id);
 
 int rwkvmobile_runtime_eval_logits(rwkvmobile_runtime_t runtime, int model_id, const int *ids, int ids_len, float * logits, int logits_len);
