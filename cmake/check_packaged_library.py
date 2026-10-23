@@ -14,5 +14,6 @@ backends.restype = ctypes.c_int
 buffer = ctypes.create_string_buffer(4096)
 assert backends(buffer, len(buffer)) == 0, "Backend enumeration failed"
 names = buffer.value.decode("utf-8").strip(",").split(",")
-assert "palm" in names, f"PALM missing from the packaged runtime: {names}"
+required = {"ncnn", "llama.cpp", *sys.argv[2:]}
+assert required.issubset(names), f"Required backends missing from the packaged runtime: {required - set(names)}"
 print(f"Packaged library C ABI verified: {library_path.name}; backends={names}")

@@ -253,3 +253,32 @@ Full LAMBADA:             3619/5153, PPL 3.96716
 - Load the model with backend name `mtk_np9`.
 - If the NP9 wrapper `.so` is not discoverable by normal loader paths, pass its full path through `rwkvmobile_runtime_load_model_with_extra`.
 - Keep NP7 and NP9 wrapper `.so` files separate when shipping both backends.
+
+
+## Opt-in Decode Diagnostics
+
+Timing is disabled by default. Before starting the process, set
+`RWKV_MOBILE_PROFILE_DECODE=1` (or Android property `debug.rwkv.engine_profile=1`).
+Restart the process after changing the setting. `RWKV-MOBILE` log records named
+`decode_profile` report monotonic nanoseconds for each single/batch chat step:
+penalties, sampling, scheduling, backend evaluation, batch logits conversion,
+and response publication. Whole-call envelopes also include preparation,
+prefill and final state handling; do not add their totals to the step totals.
+
+A profiling-enabled NP9 wrapper can additionally use `RWKV_MTK_PROFILE_DECODE=1`
+(or `debug.rwkv.np9_profile=1`). Correlate its `rwkv_mtk_profile` records with
+engine step intervals in the same process and thread. `compute_ns` is nested
+inside the graph-call total, not another additive phase (a separate lmhead, when
+present, can execute during output handling). It includes time
+waiting in the driver and does not measure NPU utilization. Inspect
+`compute_errors` and SDK return values before accepting a timing result.
+
+QoS and execution-preference setters are optional requests. Support depends on
+the device runtime; a boost value of 100 does not establish a hardware maximum.
+Start measurements without optional overrides and reject runs with compute
+errors, even if their output buffers remain finite.
+
+Standalone example/benchmark measurements are engine diagnostics. Application
+performance must be measured in the application's own generation, including its
+bridge and UI costs; values from different processes cannot be subtracted to
+estimate those costs.

@@ -10,6 +10,10 @@ on:
         type: choice
         options: [all, cpu-desktop]
         default: all
+      windows_arm64_only:
+        description: Validate Windows ARM64 only, without publishing a release
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -30,6 +34,7 @@ jobs:
       run: echo "VERSION=$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_OUTPUT
   
   build-windows-library-x64:
+    if: github.event_name != 'workflow_dispatch' || !inputs.windows_arm64_only
     needs: [setup]
     runs-on: windows-latest
     env:
@@ -65,7 +70,7 @@ jobs:
         New-Item -ItemType Directory -Force package\Release | Out-Null
         Copy-Item RelWithDebInfo\rwkv_mobile.dll package\Release\rwkv_mobile.dll
         & ..\cmake\package_windows_runtime.ps1 -Library package\Release\rwkv_mobile.dll
-        python ..\cmake\check_packaged_library.py package\Release\rwkv_mobile.dll
+        python ..\cmake\check_packaged_library.py package\Release\rwkv_mobile.dll palm
         if ($LASTEXITCODE -ne 0) { throw "Packaged Windows x64 library cannot load" }
         Push-Location package
         7z a ..\..\${{ env.PACKAGENAME }}.zip Release
@@ -95,9 +100,11 @@ jobs:
         if-no-files-found: error
   
   build-windows-library-arm64:
-    if: github.event.inputs.platforms != 'cpu-desktop'
+    if: inputs.windows_arm64_only || github.event.inputs.platforms != 'cpu-desktop'
     needs: [setup]
     runs-on: windows-11-arm
+    permissions:
+      contents: read
     env:
       PACKAGENAME: librwkv_mobile-${{ needs.setup.outputs.VERSION }}-windows-arm64
       SYMBOLS_PACKAGENAME: librwkv_mobile-${{ needs.setup.outputs.VERSION }}-windows-arm64-symbols
@@ -122,6 +129,7 @@ jobs:
           -DENABLE_NCNN_BACKEND=ON -DENABLE_WEBRWKV_BACKEND=OFF -DENABLE_LLAMACPP_BACKEND=ON -DENABLE_MNN_BACKEND=ON -DENABLE_PALM_BACKEND=ON ^
           -DENABLE_TTS=ON -DENABLE_VISION=ON -DENABLE_QNN_BACKEND=ON -DBUILD_EXAMPLES=OFF -DENABLE_SERVER=OFF ^
           -DRWKV_MOBILE_ENABLE_DEBUG_SYMBOLS=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+        if errorlevel 1 exit /b 1
         cmake -LA -N build | findstr /C:"ENABLE_TTS:BOOL=ON" || exit /b 1
         cmake -LA -N build | findstr /C:"ENABLE_VISION:BOOL=ON" || exit /b 1
         cmake --build build --config RelWithDebInfo -j 8
@@ -133,12 +141,21 @@ jobs:
         if (!(Test-Path RelWithDebInfo\rwkv_mobile.pdb)) { throw "rwkv_mobile.pdb was not produced" }
         New-Item -ItemType Directory -Force package\Release | Out-Null
         Copy-Item RelWithDebInfo\rwkv_mobile.dll package\Release\rwkv_mobile-arm64.dll
+        $headers = & llvm-readobj --file-headers package\Release\rwkv_mobile-arm64.dll
+        if ($LASTEXITCODE -ne 0 -or !($headers -match 'IMAGE_FILE_MACHINE_ARM64')) { throw "Packaged DLL is not Windows ARM64" }
         & ..\cmake\package_windows_runtime.ps1 -Library package\Release\rwkv_mobile-arm64.dll
         python ..\cmake\check_packaged_library.py package\Release\rwkv_mobile-arm64.dll
         if ($LASTEXITCODE -ne 0) { throw "Packaged Windows ARM64 library cannot load" }
         Push-Location package
         7z a ..\..\${{ env.PACKAGENAME }}.zip Release
+        if ($LASTEXITCODE -ne 0) { throw "Windows ARM64 archive creation failed" }
         Pop-Location
+        $archive = Resolve-Path ..\${{ env.PACKAGENAME }}.zip
+        $unpacked = Join-Path $env:RUNNER_TEMP "rwkv-arm64-package-${{ github.run_id }}"
+        Expand-Archive -LiteralPath $archive -DestinationPath $unpacked
+        python ..\cmake\check_packaged_library.py (Join-Path $unpacked 'Release\rwkv_mobile-arm64.dll')
+        if ($LASTEXITCODE -ne 0) { throw "Archived Windows ARM64 library cannot load" }
+        Get-FileHash -Algorithm SHA256 $archive
     - name: package-symbols
       run: |
         cd build
@@ -164,7 +181,7 @@ jobs:
         if-no-files-found: error
 
   build-ios-library:
-    if: github.event.inputs.platforms != 'cpu-desktop'
+    if: github.event.inputs.platforms != 'cpu-desktop' && (github.event_name != 'workflow_dispatch' || !inputs.windows_arm64_only)
     needs: [setup]
     runs-on: macos-15
     env:
@@ -269,7 +286,7 @@ jobs:
     #     path: ${{ env.PACKAGENAME }}-debug.zip
 
   build-macos-library-aarch64:
-    if: github.event.inputs.platforms != 'cpu-desktop'
+    if: github.event.inputs.platforms != 'cpu-desktop' && (github.event_name != 'workflow_dispatch' || !inputs.windows_arm64_only)
     needs: [setup]
     runs-on: macos-15
     env:
@@ -345,7 +362,7 @@ jobs:
     #     path: ${{ env.PACKAGENAME }}-debug.zip
 
   build-android-library:
-    if: github.event.inputs.platforms != 'cpu-desktop'
+    if: github.event.inputs.platforms != 'cpu-desktop' && (github.event_name != 'workflow_dispatch' || !inputs.windows_arm64_only)
     needs: [setup]
     runs-on: ubuntu-latest
     env:
@@ -437,6 +454,7 @@ jobs:
     #     path: ${{ env.PACKAGENAME }}-debug.zip
 
   build-linux-x64-library:
+    if: github.event_name != 'workflow_dispatch' || !inputs.windows_arm64_only
     needs: [setup]
     runs-on: ubuntu-latest
     env:
@@ -476,7 +494,7 @@ jobs:
         rm -rf package
         mkdir -p package
         cp build/librwkv_mobile-linux-x86_64.so package/librwkv_mobile-linux-x86_64.so
-        python3 cmake/check_packaged_library.py package/librwkv_mobile-linux-x86_64.so
+        python3 cmake/check_packaged_library.py package/librwkv_mobile-linux-x86_64.so palm
         pushd package
         zip -9 -y -r ../${{ env.PACKAGENAME }}.zip .
         popd
@@ -501,7 +519,7 @@ jobs:
         if-no-files-found: error
 
   build-linux-arm64-library:
-    if: github.event.inputs.platforms != 'cpu-desktop'
+    if: github.event.inputs.platforms != 'cpu-desktop' && (github.event_name != 'workflow_dispatch' || !inputs.windows_arm64_only)
     needs: [setup]
     runs-on: ubuntu-22.04-arm
     env:
@@ -551,7 +569,7 @@ jobs:
         if-no-files-found: error
 
   upload-dev-release:
-    if: github.event.inputs.platforms != 'cpu-desktop'
+    if: github.event_name != 'workflow_dispatch' && github.event.inputs.platforms != 'cpu-desktop'
     permissions:
       contents: write
     needs:
