@@ -62,6 +62,22 @@ GGUF model, tokenizer and UTF-8 prompt file. It checks complete 64-step logits
 across both incoming FZ modes and verifies caller FPCR preservation after every
 evaluation. The QNN test arguments and SDK requirements are described above.
 
+## Desktop runtime integration
+
+macOS packages pin the RWKV MLX source used by the Native workflow. On the
+measured Apple M4 Pro GPU, RWKV7 with 64-wide FP16 state uses the existing
+compiled decode scope and an eight-row WKV kernel. Other GPU architectures,
+state types and dimensions keep the original path. Model loading and cache
+lifecycle retain their existing behavior.
+
+Optional Windows CUDA builds use one cuBLAS handle and workspace per device
+and stream, with the original math mode and GEMM parameters. GGML dependencies
+remain static inside the shared Native DLL to keep timer/backend state in one
+image. Build with `-DGGML_CUDA=ON` and a compatible CUDA toolkit; package its
+cuBLAS and CUDA runtime DLLs beside Native. Retain the Vulkan backend for the
+standard desktop fallback. Model speed and full App acceptance are verified
+separately for each runtime package.
+
 ## CPU thread defaults
 
 CPU-only llama.cpp on macOS uses eight compute threads, bounded by the reported

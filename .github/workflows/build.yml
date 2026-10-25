@@ -8,7 +8,7 @@ on:
       platforms:
         description: Native build scope
         type: choice
-        options: [all, cpu-desktop]
+        options: [all, cpu-desktop, macos]
         default: all
       windows_arm64_only:
         description: Validate Windows ARM64 only, without publishing a release
@@ -19,7 +19,7 @@ permissions:
   contents: read
 
 env:
-  MLX_SWIFT_EXAMPLES_COMMIT: 2b40a7df9f189ceccf08086e0d0a068a97a83fa9
+  MLX_SWIFT_EXAMPLES_COMMIT: bac606b67b6928206f013a38e1f87962455b2052
 
 jobs:
   setup:
@@ -34,7 +34,7 @@ jobs:
       run: echo "VERSION=$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_OUTPUT
   
   build-windows-library-x64:
-    if: github.event_name != 'workflow_dispatch' || !inputs.windows_arm64_only
+    if: github.event.inputs.platforms != 'macos' && (github.event_name != 'workflow_dispatch' || !inputs.windows_arm64_only)
     needs: [setup]
     runs-on: windows-latest
     env:
@@ -100,7 +100,7 @@ jobs:
         if-no-files-found: error
   
   build-windows-library-arm64:
-    if: inputs.windows_arm64_only || github.event.inputs.platforms != 'cpu-desktop'
+    if: inputs.windows_arm64_only || (github.event.inputs.platforms != 'cpu-desktop' && github.event.inputs.platforms != 'macos')
     needs: [setup]
     runs-on: windows-11-arm
     permissions:
@@ -181,7 +181,7 @@ jobs:
         if-no-files-found: error
 
   build-ios-library:
-    if: github.event.inputs.platforms != 'cpu-desktop' && (github.event_name != 'workflow_dispatch' || !inputs.windows_arm64_only)
+    if: github.event.inputs.platforms != 'macos' && (github.event.inputs.platforms != 'cpu-desktop' && (github.event_name != 'workflow_dispatch' || !inputs.windows_arm64_only))
     needs: [setup]
     runs-on: macos-15
     env:
@@ -202,7 +202,7 @@ jobs:
         git -C mlx-swift-examples fetch --depth 1 origin "$MLX_SWIFT_EXAMPLES_COMMIT"
         git -C mlx-swift-examples checkout --detach FETCH_HEAD
         cd mlx-swift-examples
-        xcodebuild -project mlx-swift-examples.xcodeproj -scheme MLXModelFFI -configuration Release -derivedDataPath build -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO OTHER_SWIFT_FLAGS="\$(inherited) -file-prefix-map $GITHUB_WORKSPACE=. -debug-prefix-map $GITHUB_WORKSPACE=." OTHER_CFLAGS="\$(inherited) -ffile-prefix-map=$GITHUB_WORKSPACE=." OTHER_CPLUSPLUSFLAGS="\$(inherited) -ffile-prefix-map=$GITHUB_WORKSPACE=."
+        xcodebuild -onlyUsePackageVersionsFromResolvedFile -project mlx-swift-examples.xcodeproj -scheme MLXModelFFI -configuration Release -derivedDataPath build -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO OTHER_SWIFT_FLAGS="\$(inherited) -file-prefix-map $GITHUB_WORKSPACE=. -debug-prefix-map $GITHUB_WORKSPACE=." OTHER_CFLAGS="\$(inherited) -ffile-prefix-map=$GITHUB_WORKSPACE=." OTHER_CPLUSPLUSFLAGS="\$(inherited) -ffile-prefix-map=$GITHUB_WORKSPACE=."
         cp build/Build/Products/Release-iphoneos/libMLXModelFFI.a ../src/backends/mlx/prebuilt/ios-arm64/libMLXModelFFI.a
         cp build/Build/Products/Release-iphoneos/mlx-swift_Cmlx.bundle/default.metallib ../src/backends/mlx/prebuilt/ios-arm64/default.metallib
         mlx_archive="$GITHUB_WORKSPACE/src/backends/mlx/prebuilt/ios-arm64/libMLXModelFFI.a"
@@ -301,7 +301,7 @@ jobs:
         git -C mlx-swift-examples fetch --depth 1 origin "$MLX_SWIFT_EXAMPLES_COMMIT"
         git -C mlx-swift-examples checkout --detach FETCH_HEAD
         cd mlx-swift-examples
-        xcodebuild -project mlx-swift-examples.xcodeproj -scheme MLXModelFFI -configuration Release -derivedDataPath build -destination 'platform=OS X' OTHER_SWIFT_FLAGS="\$(inherited) -file-prefix-map $GITHUB_WORKSPACE=. -debug-prefix-map $GITHUB_WORKSPACE=." OTHER_CFLAGS="\$(inherited) -ffile-prefix-map=$GITHUB_WORKSPACE=." OTHER_CPLUSPLUSFLAGS="\$(inherited) -ffile-prefix-map=$GITHUB_WORKSPACE=."
+        xcodebuild -onlyUsePackageVersionsFromResolvedFile -project mlx-swift-examples.xcodeproj -scheme MLXModelFFI -configuration Release -derivedDataPath build -destination 'platform=OS X' OTHER_SWIFT_FLAGS="\$(inherited) -file-prefix-map $GITHUB_WORKSPACE=. -debug-prefix-map $GITHUB_WORKSPACE=." OTHER_CFLAGS="\$(inherited) -ffile-prefix-map=$GITHUB_WORKSPACE=." OTHER_CPLUSPLUSFLAGS="\$(inherited) -ffile-prefix-map=$GITHUB_WORKSPACE=."
         cp build/Build/Products/Release/libMLXModelFFI.a ../src/backends/mlx/prebuilt/macos-arm64/libMLXModelFFI.a
         cd ..
         rm -rf build-arm64 # build-arm64-debug
@@ -362,7 +362,7 @@ jobs:
     #     path: ${{ env.PACKAGENAME }}-debug.zip
 
   build-android-library:
-    if: github.event.inputs.platforms != 'cpu-desktop' && (github.event_name != 'workflow_dispatch' || !inputs.windows_arm64_only)
+    if: github.event.inputs.platforms != 'macos' && (github.event.inputs.platforms != 'cpu-desktop' && (github.event_name != 'workflow_dispatch' || !inputs.windows_arm64_only))
     needs: [setup]
     runs-on: ubuntu-latest
     env:
@@ -454,7 +454,7 @@ jobs:
     #     path: ${{ env.PACKAGENAME }}-debug.zip
 
   build-linux-x64-library:
-    if: github.event_name != 'workflow_dispatch' || !inputs.windows_arm64_only
+    if: github.event.inputs.platforms != 'macos' && (github.event_name != 'workflow_dispatch' || !inputs.windows_arm64_only)
     needs: [setup]
     runs-on: ubuntu-latest
     env:
@@ -519,7 +519,7 @@ jobs:
         if-no-files-found: error
 
   build-linux-arm64-library:
-    if: github.event.inputs.platforms != 'cpu-desktop' && (github.event_name != 'workflow_dispatch' || !inputs.windows_arm64_only)
+    if: github.event.inputs.platforms != 'macos' && (github.event.inputs.platforms != 'cpu-desktop' && (github.event_name != 'workflow_dispatch' || !inputs.windows_arm64_only))
     needs: [setup]
     runs-on: ubuntu-22.04-arm
     env:
@@ -569,7 +569,7 @@ jobs:
         if-no-files-found: error
 
   upload-dev-release:
-    if: github.event_name != 'workflow_dispatch' && github.event.inputs.platforms != 'cpu-desktop'
+    if: github.event.inputs.platforms != 'macos' && (github.event_name != 'workflow_dispatch' && github.event.inputs.platforms != 'cpu-desktop')
     permissions:
       contents: write
     needs:

@@ -1,0 +1,113 @@
+{
+  "status": "reviewed_reversible_cuda_stream_patch",
+  "files": [
+    {
+      "file": "common.cuh",
+      "beforeSha256": "ae55a86b4b7b3dd9a2478cfa82df4dbebf61f496f12eb61a5844d79a6a06e079",
+      "afterSha256": "0466923a269906b58b806b677b52b6d9b169634fb13928142c5df49bb1cd7f90",
+      "edits": [
+        {
+          "from": "#define GGML_CUDA_CC_ADA_LOVELACE    890\n",
+          "to": "#define GGML_CUDA_CC_ADA_LOVELACE    890\n#define GGML_CUDA_CC_HOPPER          900\n",
+          "count": 1
+        },
+        {
+          "from": "    cublasHandle_t cublas_handles[GGML_CUDA_MAX_DEVICES] = {nullptr};",
+          "to": "    cublasHandle_t cublas_handles[GGML_CUDA_MAX_DEVICES][GGML_CUDA_MAX_STREAMS] = {{nullptr}};\n    void * cublas_workspaces[GGML_CUDA_MAX_DEVICES][GGML_CUDA_MAX_STREAMS] = {{nullptr}};\n    size_t cublas_workspace_sizes[GGML_CUDA_MAX_DEVICES] = {0};",
+          "count": 1
+        },
+        {
+          "from": "    cublasHandle_t cublas_handle(int device) {\n        if (cublas_handles[device] == nullptr) {\n            ggml_cuda_set_device(device);\n            CUBLAS_CHECK(cublasCreate(&cublas_handles[device]));\n            CUBLAS_CHECK(cublasSetMathMode(cublas_handles[device], CUBLAS_TF32_TENSOR_OP_MATH));\n        }\n        return cublas_handles[device];\n    }\n\n    cublasHandle_t cublas_handle() {\n        return cublas_handle(device);\n    }",
+          "to": "    cublasHandle_t cublas_handle(int target_device, cudaStream_t target_stream) {\n        GGML_ASSERT(target_device >= 0 && target_device < ggml_cuda_info().device_count);\n        GGML_ASSERT(target_stream != nullptr);\n        int slot = 0;\n        while (slot < GGML_CUDA_MAX_STREAMS && streams[target_device][slot] != target_stream) ++slot;\n        GGML_ASSERT(slot < GGML_CUDA_MAX_STREAMS);\n        auto & handle = cublas_handles[target_device][slot];\n        if (handle == nullptr) {\n            ggml_cuda_set_device(target_device);\n            CUBLAS_CHECK(cublasCreate(&handle));\n            CUBLAS_CHECK(cublasSetMathMode(handle, CUBLAS_TF32_TENSOR_OP_MATH));\n            CUBLAS_CHECK(cublasSetStream(handle, target_stream));\n            if (cublas_workspace_sizes[target_device] == 0) {\n                const int cc = ggml_cuda_info().devices[target_device].cc;\n                cublas_workspace_sizes[target_device] = cc >= GGML_CUDA_CC_HOPPER ? 32 * 1024 * 1024 : 4 * 1024 * 1024;\n            }\n            CUDA_CHECK(cudaMalloc(&cublas_workspaces[target_device][slot], cublas_workspace_sizes[target_device]));\n            CUBLAS_CHECK(cublasSetWorkspace(handle, cublas_workspaces[target_device][slot], cublas_workspace_sizes[target_device]));\n        }\n        return handle;\n    }\n\n    cublasHandle_t cublas_handle() { return cublas_handle(device, stream()); }",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "ggml-cuda.cu",
+      "beforeSha256": "62905093cb583f4f98c651c7ddd1f2e882a1695cec42e494db223b2d6971ff56",
+      "afterSha256": "973e00639c2664ddbc18f154d72533926cdbbed5528a52d5bbf5f1890fb13418",
+      "edits": [
+        {
+          "from": "        for (int j = 0; j < GGML_CUDA_MAX_STREAMS; ++j) {\n            if (streams[i][j] != nullptr) {\n                CUDA_CHECK(cudaStreamDestroy(streams[i][j]));\n            }\n        }\n        if (cublas_handles[i] != nullptr) {\n            CUBLAS_CHECK(cublasDestroy(cublas_handles[i]));\n        }",
+          "to": "        for (int j = 0; j < GGML_CUDA_MAX_STREAMS; ++j) {\n            if (streams[i][j] != nullptr) {\n                CUDA_CHECK(cudaStreamDestroy(streams[i][j]));\n            }\n            if (cublas_handles[i][j] != nullptr) {\n                ggml_cuda_set_device(i);\n                CUBLAS_CHECK(cublasDestroy(cublas_handles[i][j]));\n            }\n            if (cublas_workspaces[i][j] != nullptr) {\n                CUDA_CHECK(cudaFree(cublas_workspaces[i][j]));\n            }\n        }",
+          "count": 1
+        },
+        {
+          "from": "    int id = ggml_cuda_get_device();\n\n    // the main device has a larger memory buffer to hold the results from all GPUs",
+          "to": "    int id = ggml_cuda_get_device();\n    cublasHandle_t handle = ctx.cublas_handle(id, stream);\n\n    // the main device has a larger memory buffer to hold the results from all GPUs",
+          "count": 1
+        },
+        {
+          "from": "        CUBLAS_CHECK(cublasSetStream(ctx.cublas_handle(id), stream));",
+          "to": "        // Keep the per-stream user workspace bound.",
+          "count": 3
+        },
+        {
+          "from": "cublasGemmEx(ctx.cublas_handle(id),",
+          "to": "cublasGemmEx(handle,",
+          "count": 3
+        },
+        {
+          "from": "cublasSgemm(ctx.cublas_handle(id),",
+          "to": "cublasSgemm(handle,",
+          "count": 1
+        },
+        {
+          "from": "    CUBLAS_CHECK(cublasSetStream(ctx.cublas_handle(), main_stream));",
+          "to": "    cublasHandle_t handle = ctx.cublas_handle();",
+          "count": 1
+        },
+        {
+          "from": "cublasGemmStridedBatchedEx(ctx.cublas_handle(),",
+          "to": "cublasGemmStridedBatchedEx(handle,",
+          "count": 1
+        },
+        {
+          "from": "cublasGemmBatchedEx(ctx.cublas_handle(),",
+          "to": "cublasGemmBatchedEx(handle,",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "solve_tri.cu",
+      "beforeSha256": "9a46d9da8aedd9cb3ff44dfa99d8ddf88dd736efe32ded8524e2867e949e505e",
+      "afterSha256": "f4795ef9b27725a969fbca7d2d3c4cf311803c66037dcaf98102e9f26318c332",
+      "edits": [
+        {
+          "from": "    CUBLAS_CHECK(cublasSetStream(ctx.cublas_handle(id), stream));",
+          "to": "    cublasHandle_t handle = ctx.cublas_handle(id, stream);",
+          "count": 1
+        },
+        {
+          "from": "cublasSetMathMode(ctx.cublas_handle(id),",
+          "to": "cublasSetMathMode(handle,",
+          "count": 2
+        },
+        {
+          "from": "cublasStrsmBatched(ctx.cublas_handle(id),",
+          "to": "cublasStrsmBatched(handle,",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "out-prod.cu",
+      "beforeSha256": "3f1539ff26d5ec9d910e1eb4297df854b2ccd04646ca1f53830ede757f21cc74",
+      "afterSha256": "037066138548c41c0e2fab0cce50e129bfc67a8723136b425a84f0e480d940f7",
+      "edits": [
+        {
+          "from": "    cudaStream_t   stream = ctx.stream();\n    cublasHandle_t handle = ctx.cublas_handle();",
+          "to": "    cublasHandle_t handle = ctx.cublas_handle();",
+          "count": 1
+        },
+        {
+          "from": "    CUBLAS_CHECK(cublasSetStream(handle, stream));",
+          "to": "    // Keep the per-stream user workspace bound.",
+          "count": 1
+        }
+      ]
+    }
+  ]
+}
