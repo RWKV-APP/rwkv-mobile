@@ -68,7 +68,8 @@
           "to": "cublasGemmBatchedEx(handle,",
           "count": 1
         }
-      ]
+      ],
+      "upstreamSha256": "f0c281d33df005093b25c9827822c11d4d3031bfe915ffd6aa385fd608f4ae4d"
     },
     {
       "file": "solve_tri.cu",
