@@ -8,7 +8,7 @@ on:
       platforms:
         description: Native build scope
         type: choice
-        options: [all, cpu-desktop, macos]
+        options: [all, cpu-desktop, macos, android]
         default: all
       windows_arm64_only:
         description: Validate Windows ARM64 only, without publishing a release
@@ -34,7 +34,7 @@ jobs:
       run: echo "VERSION=$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_OUTPUT
   
   build-windows-library-x64:
-    if: github.event.inputs.platforms != 'macos' && (github.event_name != 'workflow_dispatch' || !inputs.windows_arm64_only)
+    if: github.event.inputs.platforms != 'android' && github.event.inputs.platforms != 'macos' && (github.event_name != 'workflow_dispatch' || !inputs.windows_arm64_only)
     needs: [setup]
     runs-on: windows-latest
     env:
@@ -100,7 +100,7 @@ jobs:
         if-no-files-found: error
   
   build-windows-library-arm64:
-    if: inputs.windows_arm64_only || (github.event.inputs.platforms != 'cpu-desktop' && github.event.inputs.platforms != 'macos')
+    if: inputs.windows_arm64_only || (github.event.inputs.platforms != 'android' && github.event.inputs.platforms != 'cpu-desktop' && github.event.inputs.platforms != 'macos')
     needs: [setup]
     runs-on: windows-11-arm
     permissions:
@@ -181,7 +181,7 @@ jobs:
         if-no-files-found: error
 
   build-ios-library:
-    if: github.event.inputs.platforms != 'macos' && (github.event.inputs.platforms != 'cpu-desktop' && (github.event_name != 'workflow_dispatch' || !inputs.windows_arm64_only))
+    if: github.event.inputs.platforms != 'android' && github.event.inputs.platforms != 'macos' && (github.event.inputs.platforms != 'cpu-desktop' && (github.event_name != 'workflow_dispatch' || !inputs.windows_arm64_only))
     needs: [setup]
     runs-on: macos-15
     env:
@@ -286,7 +286,7 @@ jobs:
     #     path: ${{ env.PACKAGENAME }}-debug.zip
 
   build-macos-library-aarch64:
-    if: github.event.inputs.platforms != 'cpu-desktop' && (github.event_name != 'workflow_dispatch' || !inputs.windows_arm64_only)
+    if: github.event.inputs.platforms != 'android' && github.event.inputs.platforms != 'cpu-desktop' && (github.event_name != 'workflow_dispatch' || !inputs.windows_arm64_only)
     needs: [setup]
     runs-on: macos-15
     env:
@@ -454,7 +454,7 @@ jobs:
     #     path: ${{ env.PACKAGENAME }}-debug.zip
 
   build-linux-x64-library:
-    if: github.event.inputs.platforms != 'macos' && (github.event_name != 'workflow_dispatch' || !inputs.windows_arm64_only)
+    if: github.event.inputs.platforms != 'android' && github.event.inputs.platforms != 'macos' && (github.event_name != 'workflow_dispatch' || !inputs.windows_arm64_only)
     needs: [setup]
     runs-on: ubuntu-latest
     env:
@@ -519,7 +519,7 @@ jobs:
         if-no-files-found: error
 
   build-linux-arm64-library:
-    if: github.event.inputs.platforms != 'macos' && (github.event.inputs.platforms != 'cpu-desktop' && (github.event_name != 'workflow_dispatch' || !inputs.windows_arm64_only))
+    if: github.event.inputs.platforms != 'android' && github.event.inputs.platforms != 'macos' && (github.event.inputs.platforms != 'cpu-desktop' && (github.event_name != 'workflow_dispatch' || !inputs.windows_arm64_only))
     needs: [setup]
     runs-on: ubuntu-22.04-arm
     env:
