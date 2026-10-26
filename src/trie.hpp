@@ -7,6 +7,8 @@
 #include <unordered_map>
 #include <memory>
 #include <string>
+#include <string_view>
+#include <charconv>
 #include <unordered_set>
 #include <sstream>
 #include <cctype>
@@ -122,13 +124,22 @@ std::vector<uint8_t> processEscapes(const std::string &input, bool utf8_string =
     return result;
 }
 
-static inline std::string trimWhitespace(const std::string& input) {
+static inline std::string_view trimWhitespace(std::string_view input) {
     size_t start = input.find_first_not_of(" \t\r\n");
     if (start == std::string::npos) {
         return "";
     }
     size_t end = input.find_last_not_of(" \t\r\n");
     return input.substr(start, end - start + 1);
+}
+
+static inline int parseVocabInt(std::string_view input) {
+    int value;
+    if (!input.empty()) {
+        const auto result = std::from_chars(input.data(), input.data() + input.size(), value);
+        if (result.ec == std::errc{} && result.ptr == input.data() + input.size()) return value;
+    }
+    return std::stoi(std::string(input));
 }
 
 static inline int hexValue(char c) {
@@ -156,8 +167,8 @@ static inline void appendUtf8Bytes(std::vector<uint8_t>& out, uint32_t codePoint
     }
 }
 
-static inline std::vector<uint8_t> parsePythonLiteralBytes(const std::string& literal) {
-    std::string input = trimWhitespace(literal);
+static inline std::vector<uint8_t> parsePythonLiteralBytes(std::string_view literal) {
+    std::string_view input = trimWhitespace(literal);
     if (input.empty()) {
         return {};
     }
@@ -182,6 +193,7 @@ static inline std::vector<uint8_t> parsePythonLiteralBytes(const std::string& li
     }
 
     std::vector<uint8_t> out;
+    if (end > i) out.reserve(end - i);
     for (; i < end; ++i) {
         unsigned char c = static_cast<unsigned char>(input[i]);
         if (c != '\\') {
@@ -326,8 +338,12 @@ struct VectorHash {
 class OptimizedTrie {
 private:
     uint8_t ch;
-    std::unordered_map<uint8_t, std::unique_ptr<OptimizedTrie>> children;
-    std::unordered_set<int> values;
+    uint8_t single_child_key = 0;
+    std::unique_ptr<OptimizedTrie> single_child;
+    using Children = std::unordered_map<uint8_t, std::unique_ptr<OptimizedTrie>>;
+    std::unique_ptr<Children> children;
+    int single_value = -1;
+    std::unique_ptr<std::unordered_set<int>> values;
     OptimizedTrie* parent;
 
 public:
@@ -337,13 +353,35 @@ public:
     OptimizedTrie* add(const std::vector<uint8_t>& key, size_t idx = 0, int val = -1) {
         if (idx == key.size()) {
             if (val != -1) {
-                values.insert(val);
+                if (values) {
+                    values->insert(val);
+                } else if (single_value == -1) {
+                    single_value = val;
+                } else if (single_value != val) {
+                    // Keep insertion history for duplicate-byte token selection.
+                    values = std::make_unique<std::unordered_set<int>>();
+                    values->insert(single_value);
+                    values->insert(val);
+                }
             }
             return this;
         }
 
         uint8_t uchar = key[idx];
-        auto& child = children[uchar];
+        if (!children) {
+            if (!single_child) {
+                single_child_key = uchar;
+                single_child = std::make_unique<OptimizedTrie>(this, uchar);
+                return single_child->add(key, idx + 1, val);
+            }
+            if (single_child_key == uchar) {
+                return single_child->add(key, idx + 1, val);
+            }
+            auto branch = std::make_unique<Children>();
+            branch->emplace(single_child_key, std::move(single_child));
+            children = std::move(branch);
+        }
+        auto& child = (*children)[uchar];
         if (!child) {
             child = std::make_unique<OptimizedTrie>(this, uchar);
         }
@@ -356,16 +394,21 @@ public:
 
         while (idx < key.size()) {
             uint8_t uchar = key[idx];
-            auto it = u->children.find(uchar);
-            if (it == u->children.end()) {
+            if (u->children) {
+                auto it = u->children->find(uchar);
+                if (it == u->children->end()) {
+                    break;
+                }
+                u = it->second.get();
+            } else if (u->single_child && u->single_child_key == uchar) {
+                u = u->single_child.get();
+            } else {
                 break;
             }
-
-            u = it->second.get();
             ++idx;
 
-            if (!u->values.empty()) {
-                ret = std::make_tuple(idx, *u->values.begin());
+            if (u->single_value != -1) {
+                ret = std::make_tuple(idx, u->values ? *u->values->begin() : u->single_value);
             }
         }
 
@@ -374,12 +417,21 @@ public:
 
     size_t get_memory_usage() const {
         size_t size = sizeof(OptimizedTrie);
-        size += children.size() * (sizeof(uint8_t) + sizeof(std::unique_ptr<OptimizedTrie>));
-        size += values.size() * sizeof(int);
+        if (children) {
+            size += sizeof(*children) + children->size() * (sizeof(uint8_t) + sizeof(std::unique_ptr<OptimizedTrie>));
+        }
+        if (values) {
+            size += sizeof(*values) + values->size() * sizeof(int);
+        }
 
-        for (const auto& child : children) {
-            if (child.second) {
-                size += child.second->get_memory_usage();
+        if (single_child) {
+            size += single_child->get_memory_usage();
+        }
+        if (children) {
+            for (const auto& child : *children) {
+                if (child.second) {
+                    size += child.second->get_memory_usage();
+                }
             }
         }
         return size;
@@ -389,33 +441,81 @@ public:
 class TokenMapping {
 private:
     std::vector<std::vector<uint8_t>> token_data;
-    std::unordered_map<int, size_t> idx_to_data_idx;
-    std::unordered_map<std::vector<uint8_t>, int, VectorHash, VectorEqual> data_to_idx;
+    std::vector<size_t> idx_to_data_idx;
+    std::unordered_map<int, size_t> sparse_idx_to_data_idx;
+    std::unordered_map<std::string_view, int> data_to_idx;
+
+    static std::string_view byte_view(const std::vector<uint8_t>& data) {
+        return data.empty() ? std::string_view{} : std::string_view(reinterpret_cast<const char*>(data.data()), data.size());
+    }
+
+    void swap(TokenMapping& other) noexcept {
+        token_data.swap(other.token_data);
+        idx_to_data_idx.swap(other.idx_to_data_idx);
+        sparse_idx_to_data_idx.swap(other.sparse_idx_to_data_idx);
+        data_to_idx.swap(other.data_to_idx);
+    }
+
+    void set_data_index(int token_id, size_t data_idx) {
+        // Bound dense storage; preserve arbitrary negative and large IDs.
+        if (token_id >= 0 && token_id < 131072) {
+            if (idx_to_data_idx.empty()) idx_to_data_idx.reserve(131072);
+            if (idx_to_data_idx.size() <= static_cast<size_t>(token_id)) {
+                idx_to_data_idx.resize(static_cast<size_t>(token_id) + 1, static_cast<size_t>(-1));
+            }
+            idx_to_data_idx[token_id] = data_idx;
+        } else {
+            sparse_idx_to_data_idx[token_id] = data_idx;
+        }
+    }
 
 public:
+    TokenMapping() = default;
+    TokenMapping(const TokenMapping& other)
+        : token_data(other.token_data), idx_to_data_idx(other.idx_to_data_idx), sparse_idx_to_data_idx(other.sparse_idx_to_data_idx) {
+        if (!idx_to_data_idx.empty()) idx_to_data_idx.reserve(131072);
+        data_to_idx.reserve(other.data_to_idx.size());
+        for (const auto& data : token_data) {
+            data_to_idx.emplace(byte_view(data), other.get_token_id(data));
+        }
+    }
+    TokenMapping(TokenMapping&&) noexcept = default;
+    TokenMapping& operator=(const TokenMapping& other) {
+        if (this != &other) { TokenMapping copy(other); swap(copy); }
+        return *this;
+    }
+    TokenMapping& operator=(TokenMapping&& other) noexcept {
+        if (this != &other) swap(other);
+        return *this;
+    }
+
     void add_token(int token_id, const std::vector<uint8_t>& data) {
-        auto it = data_to_idx.find(data);
+        auto it = data_to_idx.find(byte_view(data));
         if (it != data_to_idx.end()) {
-            idx_to_data_idx[token_id] = it->second;
+            set_data_index(token_id, it->second);
         } else {
             size_t data_idx = token_data.size();
             token_data.push_back(data);
-            idx_to_data_idx[token_id] = data_idx;
-            data_to_idx[data] = token_id;
+            set_data_index(token_id, data_idx);
+            data_to_idx[byte_view(token_data.back())] = token_id;
         }
     }
 
     const std::vector<uint8_t>& get_token_data(int token_id) const {
-        auto it = idx_to_data_idx.find(token_id);
-        if (it != idx_to_data_idx.end()) {
-            return token_data[it->second];
+        size_t data_idx = static_cast<size_t>(-1);
+        if (token_id >= 0 && static_cast<size_t>(token_id) < idx_to_data_idx.size()) {
+            data_idx = idx_to_data_idx[token_id];
+        } else if (token_id < 0 || token_id >= 131072) {
+            auto it = sparse_idx_to_data_idx.find(token_id);
+            if (it != sparse_idx_to_data_idx.end()) data_idx = it->second;
         }
+        if (data_idx != static_cast<size_t>(-1)) return token_data[data_idx];
         static const std::vector<uint8_t> empty;
         return empty;
     }
 
     int get_token_id(const std::vector<uint8_t>& data) const {
-        auto it = data_to_idx.find(data);
+        auto it = data_to_idx.find(byte_view(data));
         return it != data_to_idx.end() ? it->second : -1;
     }
 
@@ -426,8 +526,9 @@ public:
             size += data.size();
         }
 
-        size += idx_to_data_idx.size() * (sizeof(int) + sizeof(size_t));
-        size += data_to_idx.size() * (sizeof(std::vector<uint8_t>) + sizeof(int));
+        size += idx_to_data_idx.capacity() * sizeof(size_t);
+        size += sparse_idx_to_data_idx.size() * (sizeof(int) + sizeof(size_t));
+        size += data_to_idx.size() * (sizeof(std::string_view) + sizeof(int));
 
         return size;
     }
@@ -466,14 +567,14 @@ public:
         while (getline(file, line)) {
             size_t firstSpace = line.find(' ');
             size_t lastSpace = line.rfind(' ');
-            int idx = std::stoi(line.substr(0, firstSpace));
-            int utf8_byte_length = std::stoi(line.substr(lastSpace + 1));
-            std::string token_literal = line.substr(firstSpace + 1, lastSpace - firstSpace);
+            int idx = parseVocabInt(std::string_view(line).substr(0, firstSpace));
+            int utf8_byte_length = parseVocabInt(std::string_view(line).substr(lastSpace + 1));
+            std::string_view token_literal = std::string_view(line).substr(firstSpace + 1, lastSpace - firstSpace);
             std::vector<uint8_t> x;
             if (is_converted) {
                 bool utf8_string = line[firstSpace + 1] != 'b';
                 x = processEscapes(
-                    processVocabFormat(token_literal),
+                    processVocabFormat(std::string(token_literal)),
                     utf8_string,
                     utf8_byte_length
                 );

@@ -295,6 +295,17 @@ int mlx_rwkv_backend::set_state_on_batch_slot(int slot, std::any state) {
 }
 
 int mlx_rwkv_backend::zero_state() {
+#ifndef RWKV_MOBILE_IOS_BUILD
+    static const auto zero_all = reinterpret_cast<int (*)(void *)>(dlsym(RTLD_SELF, "mlx_cache_zero_all"));
+    if (model_handle && zero_all) {
+        const int ret = zero_all(model_handle);
+        if (ret == 0) return RWKV_SUCCESS;
+        if (ret != -2) {
+            LOGE("Failed to clear MLX cache: %s\n", mlx_last_error_message());
+            return RWKV_ERROR_EVAL;
+        }
+    }
+#endif
     return zero_state_on_batch_slot(0);
 }
 
