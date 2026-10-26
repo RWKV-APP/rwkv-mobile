@@ -3,6 +3,10 @@
 #include "commondef.h"
 #include "logger.h"
 #include "MLXModelFFI.h"
+#include "sampler.h"
+#include <chrono>
+#include <cstdlib>
+#include <dlfcn.h>
 
 namespace rwkvmobile {
 
@@ -59,6 +63,74 @@ int32_t mlx_rwkv_backend::cache_size_bytes() const {
     return n_layers * (num_heads + 2) * hidden_size * (int32_t)sizeof(__fp16);
 }
 
+void mlx_rwkv_backend::trace_eval(int tokens, int batch, long long elapsed_us) {
+    if (!std::getenv("RWKV_MLX_TRACE_TIMING")) return;
+    if (tokens == 1 && ++traced_decode_calls > 4) return;
+    const char *scope = std::getenv("RWKV_MLX_COMPILE_SCOPE");
+    LOGI("[MLX_DIAG] scope=%s tokens=%d batch=%d elapsed_us=%lld decode_call=%u\n",
+         scope ? scope : "baseline", tokens, batch, elapsed_us, traced_decode_calls);
+}
+
+int mlx_rwkv_backend::device_greedy_step(int &token) {
+    // Older FFI archives do not export the optional device sampling functions.
+    static const auto step = reinterpret_cast<int (*)(void *, int32_t *)>(dlsym(RTLD_SELF, "mlx_device_greedy_step"));
+    static const auto finish = reinterpret_cast<int (*)(void *, int32_t, float *)>(dlsym(RTLD_SELF, "mlx_device_greedy_finish"));
+    if (!model_handle || !step || !finish) {
+        return RWKV_ERROR_UNSUPPORTED;
+    }
+    int32_t selected = 0;
+    const int status = step(model_handle, &selected);
+    if (status == -2) return RWKV_ERROR_UNSUPPORTED;
+    if (status != 0) return RWKV_ERROR_EVAL;
+    token = selected;
+    return RWKV_SUCCESS;
+}
+
+int mlx_rwkv_backend::device_greedy_finish(bool rollback, Tensor1D &logits) {
+    static const auto finish = reinterpret_cast<int (*)(void *, int32_t, float *)>(dlsym(RTLD_SELF, "mlx_device_greedy_finish"));
+    if (!model_handle || !finish) return RWKV_ERROR_UNSUPPORTED;
+    logits_buffer.resize((size_t)vocab_size);
+    if (finish(model_handle, rollback ? 1 : 0, logits_buffer.data()) != 0) {
+        return RWKV_ERROR_EVAL;
+    }
+    logits = Tensor1D::make(logits_buffer.data(), TensorDType::F32, (size_t)vocab_size);
+    return RWKV_SUCCESS;
+}
+
+int mlx_rwkv_backend::device_sample_proposal(const DeviceSampleParameters &parameters, int &token, Tensor1D &prior_logits) {
+    static const auto propose = reinterpret_cast<decltype(&mlx_device_sample_proposal)>(dlsym(RTLD_SELF, "mlx_device_sample_proposal"));
+    static const auto finish = dlsym(RTLD_SELF, "mlx_device_greedy_finish");
+    if (!model_handle || !propose || !finish) return RWKV_ERROR_UNSUPPORTED;
+    logits_buffer.resize((size_t)vocab_size);
+    int32_t selected = 0;
+    const int status = propose(model_handle, parameters.temperature, parameters.top_k, parameters.top_p,
+        parameters.random_draw, parameters.bias_ids.data(), parameters.biases.data(),
+        static_cast<int32_t>(parameters.bias_ids.size()), &selected, logits_buffer.data());
+    if (status == -2) return RWKV_ERROR_UNSUPPORTED;
+    if (status != 0) return RWKV_ERROR_EVAL;
+    token = selected;
+    prior_logits = Tensor1D::make(logits_buffer.data(), TensorDType::F32, (size_t)vocab_size);
+    return RWKV_SUCCESS;
+}
+
+int mlx_rwkv_backend::eval_deferred(int id) {
+    static const auto submit = reinterpret_cast<int (*)(void *, int32_t)>(dlsym(RTLD_SELF, "mlx_model_eval_submit"));
+    static const auto finish = reinterpret_cast<int (*)(void *, float *)>(dlsym(RTLD_SELF, "mlx_model_eval_finish"));
+    if (!model_handle || !submit || !finish) return RWKV_ERROR_UNSUPPORTED;
+    const int status = submit(model_handle, id);
+    if (status == -2) return RWKV_ERROR_UNSUPPORTED;
+    return status == 0 ? RWKV_SUCCESS : RWKV_ERROR_EVAL;
+}
+
+int mlx_rwkv_backend::finish_deferred(Tensor1D &logits) {
+    static const auto finish = reinterpret_cast<int (*)(void *, float *)>(dlsym(RTLD_SELF, "mlx_model_eval_finish"));
+    if (!model_handle || !finish) return RWKV_ERROR_UNSUPPORTED;
+    logits_buffer.resize((size_t)vocab_size);
+    if (finish(model_handle, logits_buffer.data()) != 0) return RWKV_ERROR_EVAL;
+    logits = Tensor1D::make(logits_buffer.data(), TensorDType::F32, (size_t)vocab_size);
+    return RWKV_SUCCESS;
+}
+
 int mlx_rwkv_backend::eval(int id, Tensor1D & logits) {
     if (!model_handle) {
         LOGE("MLX model not loaded\n");
@@ -69,7 +141,9 @@ int mlx_rwkv_backend::eval(int id, Tensor1D & logits) {
         logits_buffer.resize(vocab_size);
     }
 
+    const auto start = std::chrono::steady_clock::now();
     int ret = mlx_model_eval(model_handle, &id, 1, logits_buffer.data());
+    trace_eval(1, 1, std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
     if (ret != 0) {
         LOGE("Failed to evaluate MLX model: %s\n", mlx_last_error_message());
         return RWKV_ERROR_EVAL;
@@ -90,7 +164,9 @@ int mlx_rwkv_backend::eval(std::vector<int> ids, Tensor1D & logits) {
     }
 
     std::vector<int32_t> ids_u32(ids.begin(), ids.end());
+    const auto start = std::chrono::steady_clock::now();
     int ret = mlx_model_eval(model_handle, ids_u32.data(), (int32_t)ids_u32.size(), logits_buffer.data());
+    trace_eval((int)ids.size(), 1, std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
     if (ret != 0) {
         LOGE("Failed to evaluate MLX model: %s\n", mlx_last_error_message());
         return RWKV_ERROR_EVAL;
@@ -138,7 +214,9 @@ int mlx_rwkv_backend::eval_batch_tokens(const std::vector<int> &ids, Tensor1D & 
     }
 
     std::vector<int32_t> ids_i32(ids.begin(), ids.end());
+    const auto start = std::chrono::steady_clock::now();
     int ret = mlx_model_eval_batch_tokens(model_handle, ids_i32.data(), (int32_t)batch_size, logits_buffer.data());
+    trace_eval(1, batch_size, std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
     if (ret != 0) {
         LOGE("Failed to evaluate MLX model batch: %s\n", mlx_last_error_message());
         return RWKV_ERROR_EVAL;
@@ -153,7 +231,7 @@ int mlx_rwkv_backend::get_state(std::any &state) {
 }
 
 int mlx_rwkv_backend::set_state(std::any state) {
-    return set_state_on_batch_slot(0, state);
+    return set_state_on_batch_slot(0, std::move(state));
 }
 
 int mlx_rwkv_backend::get_state_on_batch_slot(int slot, std::any &state) {

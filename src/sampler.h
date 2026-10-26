@@ -6,10 +6,20 @@
 #include <vector>
 #include <map>
 #include <mutex>
+#include <cstdint>
 
 #include "tensor.h"
 
 namespace rwkvmobile {
+
+struct DeviceSampleParameters {
+    float temperature;
+    int32_t top_k;
+    float top_p;
+    uint32_t random_draw;
+    std::vector<int32_t> bias_ids;
+    std::vector<float> biases;
+};
 
 class NucleusSampler {
 public:
@@ -22,6 +32,8 @@ public:
     void clear_occurences() { _occurences.clear(); }
 
     void update_occurences(int token);
+
+    bool prepare_device_sample(size_t size, DeviceSampleParameters &parameters);
 
     int sample(const Tensor1D & logits, const size_t size);
 
