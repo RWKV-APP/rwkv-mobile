@@ -3,9 +3,11 @@
 #include "engine/engine.h"
 #include "logger.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <climits>
 #include <cstdlib>
+#include <thread>
 
 #if defined(__aarch64__) && defined(__linux__)
 #include <asm/hwcap.h>
@@ -16,6 +18,23 @@
 
 namespace rwkvmobile {
 namespace {
+
+#if defined(_WIN32)
+// Scale Windows workers beyond the upstream eight-thread limit.
+constexpr int windows_palm_default_threads(unsigned int logical_cpus) {
+    if (logical_cpus == 0) return 4;
+    if (logical_cpus <= 8) return static_cast<int>(logical_cpus);
+    return static_cast<int>((std::max)(8u, logical_cpus - 2));
+}
+static_assert(windows_palm_default_threads(0) == 4 &&
+              windows_palm_default_threads(1) == 1 &&
+              windows_palm_default_threads(2) == 2);
+static_assert(windows_palm_default_threads(8) == 8 &&
+              windows_palm_default_threads(9) == 8 &&
+              windows_palm_default_threads(10) == 8);
+static_assert(windows_palm_default_threads(24) == 22 &&
+              windows_palm_default_threads(64) == 62);
+#endif
 
 bool metadata_int(const std::unordered_map<std::string, std::string>& metadata,
                   const char* key, int& value) {
@@ -69,6 +88,8 @@ int palm_backend::load_model(std::string model_path, void*) {
 #if defined(__ANDROID__)
     // Leave CPU headroom for the caller and UI around Palm's spinning workers.
     config.num_threads = 4;
+#elif defined(_WIN32)
+    config.num_threads = windows_palm_default_threads(std::thread::hardware_concurrency());
 #endif
     if (const char *value = std::getenv("RWKV_PALM_THREADS")) {
         errno = 0;

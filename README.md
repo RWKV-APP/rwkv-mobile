@@ -70,8 +70,11 @@ For QNN, set `RWKV_QNN_BACKEND_PATH` to the absolute `libQnnHtp.so` path.
 
 Windows/Linux x64 CPU inference with llama.cpp defaults to half the logical
 CPU count (rounded down), with a minimum of four compute threads. Desktop
-ARM64 retains its cap of 12 available compute threads. Desktop Palm uses its
-upstream topology-derived default, capped at eight compute threads.
+ARM64 retains its cap of 12 available compute threads. Desktop Palm keeps its
+upstream topology-derived default (at most eight compute threads), except on
+Windows. Windows Palm uses N workers when N <= 8, otherwise max(8, N - 2),
+where N is the total reported logical CPU count; unknown N falls back to four.
+Worker counts do not set affinity or reserve exclusive physical cores.
 `RWKV_LLAMACPP_THREADS` and `RWKV_PALM_THREADS` override the respective thread
 counts. GPU offload keeps its existing defaults. Palm uses four threads on
 Android; llama.cpp uses the online CPU count there.

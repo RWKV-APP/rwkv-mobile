@@ -904,7 +904,8 @@ struct response_buffer rwkvmobile_runtime_get_response_buffer_content(rwkvmobile
         return buffer;
     }
     auto rt = static_cast<class Runtime *>(runtime);
-    std::string content = rt->get_response_buffer_content(model_id);
+    bool eos_found = false;
+    std::string content = rt->get_response_buffer_content(model_id, &eos_found);
     buffer.length = content.size();
     buffer.content = (char *)malloc((buffer.length + 1) * sizeof(char));
     if (buffer.content == nullptr) {
@@ -912,7 +913,7 @@ struct response_buffer rwkvmobile_runtime_get_response_buffer_content(rwkvmobile
     }
     memset(buffer.content, 0, buffer.length + 1);
     strncpy(buffer.content, content.c_str(), buffer.length);
-    buffer.eos_found = rt->get_response_buffer_eos_found(model_id);
+    buffer.eos_found = eos_found;
     return buffer;
 }
 
@@ -930,7 +931,7 @@ struct batch_tokens_count rwkvmobile_runtime_get_response_buffer_tokens_count_ba
     }
     auto rt = static_cast<class Runtime *>(runtime);
     std::vector<int> counts = rt->get_response_buffer_tokens_count_batch(model_id);
-    static std::vector<int> token_counts_static;
+    static thread_local std::vector<int> token_counts_static;
     token_counts_static = std::move(counts);
 
     struct batch_tokens_count count;
@@ -976,8 +977,8 @@ struct response_buffer_batch rwkvmobile_runtime_get_response_buffer_content_batc
         return buffer;
     }
     auto rt = static_cast<class Runtime *>(runtime);
-    std::vector<std::string> contents = rt->get_response_buffer_content_batch(model_id);
-    auto eos_founds = rt->get_response_buffer_eos_found_batch(model_id);
+    std::vector<bool> eos_founds;
+    std::vector<std::string> contents = rt->get_response_buffer_content_batch(model_id, &eos_founds);
     buffer.batch_size = contents.size();
     buffer.contents = (char **)malloc(contents.size() * sizeof(char *));
     buffer.lengths = (int *)malloc(contents.size() * sizeof(int));
