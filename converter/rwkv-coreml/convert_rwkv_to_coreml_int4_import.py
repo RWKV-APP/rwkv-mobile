@@ -51,8 +51,8 @@ parser.add_argument(
 parser.add_argument(
     '--state-mode',
     choices=['coreml', 'tensor', 'wkv-coreml'],
-    default='wkv-coreml',
-    help='Use Core ML StateType, expose all RWKV state as tensors, or keep only WKV as Core ML state',
+    default='tensor',
+    help='Expose RWKV state as tensors by default to avoid ANE mutable-state compilation failures; legacy StateType modes remain explicit options',
 )
 parser.add_argument(
     '--decode-compute-units',

@@ -265,11 +265,11 @@ static MLModel * load_coreml_model_with_retry(
 
         if (error == nil && model != nil) {
             if (attempt == 1) {
-                COREML_LOGI(@"Loaded chunk %d/%d (%@) %@: %.2f ms",
-                      chunk_idx + 1, num_chunks, model_name, function_name, ms);
+                COREML_LOGI(@"Loaded chunk %d/%d (%@) %@: %.2f ms, compute_units=%@",
+                      chunk_idx + 1, num_chunks, model_name, function_name, ms, compute_units_name(configuration.computeUnits));
             } else {
-                COREML_LOGI(@"Loaded chunk %d/%d (%@) %@: %.2f ms (attempt %d/%d)",
-                      chunk_idx + 1, num_chunks, model_name, function_name, ms, attempt, max_attempts);
+                COREML_LOGI(@"Loaded chunk %d/%d (%@) %@: %.2f ms (attempt %d/%d), compute_units=%@",
+                      chunk_idx + 1, num_chunks, model_name, function_name, ms, attempt, max_attempts, compute_units_name(configuration.computeUnits));
             }
             return model;
         }
@@ -282,6 +282,13 @@ static MLModel * load_coreml_model_with_retry(
         if (attempt < max_attempts && retry_delay_ms > 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(retry_delay_ms));
         }
+    }
+
+    if (configuration.computeUnits == MLComputeUnitsCPUAndNeuralEngine) {
+        COREML_LOGW(@"CPU + Neural Engine failed for %@ model %@; retrying with CPU + GPU", function_name, model_name);
+        MLModelConfiguration *fallback = [configuration copy];
+        fallback.computeUnits = MLComputeUnitsCPUAndGPU;
+        return load_coreml_model_with_retry(url_model, fallback, model_name, function_name, chunk_idx, num_chunks);
     }
 
     return nil;
