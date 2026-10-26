@@ -136,6 +136,9 @@ jobs:
       run: |
         rustup target add aarch64-apple-ios
         git clone --single-branch --branch rwkv-mobile https://github.com/mollysophia/mlx-swift-examples.git --depth 1
+        git -C mlx-swift-examples fetch --depth 1 origin 34b276b9c774a8d6465e009382dae12f4e97b849
+        git -C mlx-swift-examples checkout --detach FETCH_HEAD
+        git -C mlx-swift-examples apply "$GITHUB_WORKSPACE/cmake/mlx-compile-reuse.patch"
         cd mlx-swift-examples
         xcodebuild -project mlx-swift-examples.xcodeproj -scheme MLXModelFFI -configuration Release -derivedDataPath build -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO
         cp build/Build/Products/Release-iphoneos/libMLXModelFFI.a ../src/backends/mlx/prebuilt/ios-arm64/libMLXModelFFI.a
@@ -222,6 +225,9 @@ jobs:
     - name: build-arm64
       run: |
         git clone --single-branch --branch rwkv-mobile https://github.com/mollysophia/mlx-swift-examples.git --depth 1
+        git -C mlx-swift-examples fetch --depth 1 origin 34b276b9c774a8d6465e009382dae12f4e97b849
+        git -C mlx-swift-examples checkout --detach FETCH_HEAD
+        git -C mlx-swift-examples apply "$GITHUB_WORKSPACE/cmake/mlx-compile-reuse.patch"
         cd mlx-swift-examples
         xcodebuild -project mlx-swift-examples.xcodeproj -scheme MLXModelFFI -configuration Release -derivedDataPath build -destination 'platform=OS X'
         cp build/Build/Products/Release/libMLXModelFFI.a ../src/backends/mlx/prebuilt/macos-arm64/libMLXModelFFI.a
