@@ -12,6 +12,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <thread>
+#include <future>
+#include <system_error>
+#include <exception>
 #ifdef __ANDROID__
 #include <sys/system_properties.h>
 #include <dirent.h>
@@ -542,12 +545,49 @@ int Runtime::load_model(std::string model_path, std::string backend_name, std::s
         return ret_model_id;
     }
 
+    // The future joins before model_instance is destroyed on every early return.
+    std::future<int> tokenizer_load;
+    const bool profile_load = std::getenv("RWKV_MOBILE_PROFILE_LOAD") != nullptr;
+    const auto load_origin = std::chrono::steady_clock::now();
+#if defined(__APPLE__) && defined(ENABLE_MLX) && !defined(RWKV_MOBILE_IOS_BUILD)
+    const char *parallel_tokenizer = std::getenv("RWKV_MLX_PARALLEL_TOKENIZER");
+    if (backend_id == RWKV_BACKEND_MLX && !tokenizer_path.empty() &&
+        parallel_tokenizer && std::strcmp(parallel_tokenizer, "1") == 0) {
+        model_instance->tokenizer = std::unique_ptr<tokenizer_base, std::function<void(tokenizer_base*)>>(new trie_tokenizer,
+            [](tokenizer_base *p) { delete (trie_tokenizer*)p; });
+        auto *tokenizer = model_instance->tokenizer.get();
+        try {
+            tokenizer_load = std::async(std::launch::async, [tokenizer, tokenizer_path, profile_load, load_origin] {
+                const auto start = std::chrono::steady_clock::now();
+                const int status = tokenizer->load(tokenizer_path);
+                if (profile_load) {
+                    const auto end = std::chrono::steady_clock::now();
+                    LOGI("[LOAD_PROFILE] tokenizer async=1 thread=%zu start_us=%lld end_us=%lld status=%d\n",
+                        std::hash<std::thread::id>{}(std::this_thread::get_id()),
+                        (long long)std::chrono::duration_cast<std::chrono::microseconds>(start - load_origin).count(),
+                        (long long)std::chrono::duration_cast<std::chrono::microseconds>(end - load_origin).count(), status);
+                }
+                return status;
+            });
+        } catch (const std::system_error &error) {
+            LOGI("Tokenizer worker unavailable; using serial load: %s\n", error.what());
+        }
+    }
+#endif
+    const auto backend_load_start = std::chrono::steady_clock::now();
     // 2. Load model (expose backend for progress polling during async load)
     {
         std::lock_guard<std::mutex> lock(_loading_backend_mutex);
         _loading_backend = model_instance->backend.get();
     }
     ret = model_instance->backend->load_model(model_path, extra);
+    if (profile_load) {
+        const auto end = std::chrono::steady_clock::now();
+        LOGI("[LOAD_PROFILE] weights thread=%zu start_us=%lld end_us=%lld status=%d\n",
+            std::hash<std::thread::id>{}(std::this_thread::get_id()),
+            (long long)std::chrono::duration_cast<std::chrono::microseconds>(backend_load_start - load_origin).count(),
+            (long long)std::chrono::duration_cast<std::chrono::microseconds>(end - load_origin).count(), ret);
+    }
     {
         std::lock_guard<std::mutex> lock(_loading_backend_mutex);
         _loading_backend = nullptr;
@@ -590,12 +630,19 @@ int Runtime::load_model(std::string model_path, std::string backend_name, std::s
 
     // 3. Load tokenizer
     if (!tokenizer_path.empty()) {
-        model_instance->tokenizer = std::unique_ptr<tokenizer_base, std::function<void(tokenizer_base*)>>(new trie_tokenizer,
-            [](tokenizer_base *p) { delete (trie_tokenizer*)p; });
+        if (!model_instance->tokenizer) {
+            model_instance->tokenizer = std::unique_ptr<tokenizer_base, std::function<void(tokenizer_base*)>>(new trie_tokenizer,
+                [](tokenizer_base *p) { delete (trie_tokenizer*)p; });
+        }
         if (model_instance->tokenizer == nullptr) {
             return ret_model_id;
         }
-        ret = model_instance->tokenizer->load(tokenizer_path);
+        try {
+            ret = tokenizer_load.valid() ? tokenizer_load.get() : model_instance->tokenizer->load(tokenizer_path);
+        } catch (const std::exception &error) {
+            LOGE("[LOAD_MODEL] Tokenizer load failed: %s\n", error.what());
+            return ret_model_id;
+        }
         if (ret) {
             LOGE("[LOAD_MODEL] Failed to load tokenizer for model ID %d", next_model_id);
             return ret_model_id;

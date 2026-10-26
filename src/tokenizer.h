@@ -33,7 +33,7 @@ public:
     std::string decode(const std::vector<int> &ids) const;
     std::string decode(int id) const;
 private:
-    OptimizedTrieTokenizer * _tokenizer;
+    OptimizedTrieTokenizer * _tokenizer = nullptr;
 };
 
 class abc_tokenizer : public tokenizer_base {
