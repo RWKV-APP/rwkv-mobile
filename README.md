@@ -145,10 +145,11 @@ CPU count (rounded down), with a minimum of four compute threads. Desktop
 CPU fallback uses this budget even when GPU layers were requested but no GPU
 device is available. Actual GPU offload keeps its existing thread defaults.
 Desktop
-ARM64 retains its cap of 12 available compute threads. Desktop Palm keeps its
-upstream topology-derived default (at most eight compute threads), except on
-Windows. Windows Palm uses N workers when N <= 8, otherwise max(8, N - 2),
-where N is the total reported logical CPU count; unknown N falls back to four.
+ARM64 retains its cap of 12 available compute threads. For Palm, N is the total
+reported logical CPU count. Linux Palm uses max(1, N - 2) compute threads;
+unknown N falls back to one. Windows Palm uses N workers when N <= 8, otherwise
+max(8, N - 2); unknown N falls back to four. Other desktop platforms retain
+Palm's upstream topology-derived default (at most eight compute threads).
 Worker counts do not set affinity or reserve exclusive physical cores.
 `RWKV_LLAMACPP_THREADS` and `RWKV_PALM_THREADS` override the respective thread
 counts. GPU offload keeps its existing defaults. Palm uses four threads on
